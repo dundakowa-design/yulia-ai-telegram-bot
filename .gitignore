@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.ogg
+*.png
+*.json
+temp_*
+chat_log.txt
+info.txt
+test.py
