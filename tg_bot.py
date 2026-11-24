@@ -54,19 +54,158 @@ user_documents = {}  # Здесь будем хранить текст посл�
 waiting_for_image_prompt = (
     set()
 )  # Запоминаем пользователей, которые нажали кнопку рисования
+pending_memory_clear = set()  # Подтверждение очистки памяти
+
+MAIN_MENU_LABELS = {
+    "✨ Помощник",
+    "🎨 Фото и дизайн",
+    "🎙 Голос",
+    "📄 Документы",
+    "🎭 Режим",
+    "⚙️ Настройки",
+}
+
+LEGACY_MENU_LABELS = {
+    "✨ Что ты умеешь?": "✨ Помощник",
+    "🎨 Нарисовать картинку": "🎨 Фото и дизайн",
+    "🎙 Сменить голос": "🎙 Голос",
+    "🎭 Сменить роль": "🎭 Режим",
+}
 
 
-# Обновлённая клавиатура с кнопкой генерации картинок
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn1 = types.KeyboardButton("✨ Что ты умеешь?")
-    btn2 = types.KeyboardButton("🎨 Нарисовать картинку")
-    btn3 = types.KeyboardButton("🧹 Очистить память")
-    btn4 = types.KeyboardButton("🎙 Сменить голос")
-    btn5 = types.KeyboardButton("🎭 Сменить роль")
-    keyboard.add(btn1, btn2)
-    keyboard.add(btn3, btn4, btn5)
+    keyboard.row(
+        types.KeyboardButton("✨ Помощник"),
+        types.KeyboardButton("🎨 Фото и дизайн"),
+    )
+    keyboard.row(
+        types.KeyboardButton("🎙 Голос"),
+        types.KeyboardButton("📄 Документы"),
+    )
+    keyboard.row(
+        types.KeyboardButton("🎭 Режим"),
+        types.KeyboardButton("⚙️ Настройки"),
+    )
     return keyboard
+
+
+def get_roles_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton(text=info["name"], callback_data=f"role_{key}")
+        for key, info in ROLES.items()
+    ]
+    keyboard.add(*buttons)
+    return keyboard
+
+
+def show_section(chat_id, section):
+    """Показывает справку или меню настроек, не меняя историю диалога."""
+    if section == "✨ Помощник":
+        send_pretty_message(
+            chat_id,
+            "✨ *Я здесь!*\n"
+            "Напиши, что хочешь узнать, обсудить или придумать. "
+            "Можно просто продолжить наш диалог.",
+            reply_markup=get_main_keyboard(),
+        )
+    elif section == "🎨 Фото и дизайн":
+        send_pretty_message(
+            chat_id,
+            "🎨 *Фото и дизайн*\n"
+            "Создать изображение — напиши «Нарисуй…» и опиши идею.\n"
+            "Изменить фотографию — пришли её с подписью, например «Убери фон».\n"
+            "Обсудить изображение — просто отправь фото с вопросом или без него.",
+            reply_markup=get_main_keyboard(),
+        )
+    elif section == "🎙 Голос":
+        voice = user_voices.get(chat_id, "nova")
+        voice_name = "Мужской (Onyx)" if voice == "onyx" else "Женский (Nova)"
+        send_pretty_message(
+            chat_id,
+            "🎙 *Голосовое общение*\n"
+            "Отправь голосовое сообщение — я распознаю речь, отвечу и озвучу ответ.\n\n"
+            f"Текущий голос озвучки: *{voice_name}*. Переключить его можно в настройках.",
+            reply_markup=get_main_keyboard(),
+        )
+    elif section == "📄 Документы":
+        send_pretty_message(
+            chat_id,
+            "📄 *Документы*\n"
+            "Пришли PDF, DOCX или TXT — я помогу разобраться с содержимым "
+            "и подготовлю краткую выжимку.\n\n"
+            "Если у тебя есть конкретный вопрос или пожелание, добавь его к файлу.",
+            reply_markup=get_main_keyboard(),
+        )
+    elif section == "🎭 Режим":
+        current_role = ROLES[user_roles.get(chat_id, "default")]["name"]
+        send_pretty_message(
+            chat_id,
+            f"🎭 *Текущий режим:* {current_role}\n\nВыбери подходящий режим:",
+            reply_markup=get_roles_keyboard(),
+        )
+    elif section == "⚙️ Настройки":
+        role_name = ROLES[user_roles.get(chat_id, "default")]["name"]
+        voice = user_voices.get(chat_id, "nova")
+        voice_name = "Мужской (Onyx)" if voice == "onyx" else "Женский (Nova)"
+        keyboard = types.InlineKeyboardMarkup(row_width=1)
+        keyboard.add(
+            types.InlineKeyboardButton(
+                text="🎙 Переключить голос", callback_data="settings_voice"
+            ),
+            types.InlineKeyboardButton(
+                text="🧹 Очистить память", callback_data="settings_clear"
+            ),
+        )
+        send_pretty_message(
+            chat_id,
+            "⚙️ *Настройки*\n"
+            f"Режим: {role_name}\n"
+            f"Голос ответа: {voice_name}\n\n"
+            "Здесь можно сменить голос или начать новый разговор.",
+            reply_markup=keyboard,
+        )
+
+
+def show_welcome(message, is_new_user=False):
+    user_id = message.chat.id
+    if user_id not in user_histories:
+        user_histories[user_id] = [
+            {"role": "system", "content": get_system_prompt(user_id)}
+        ]
+
+    if is_new_user:
+        welcome_text = (
+            "✨ *Добро пожаловать в Yulia AI*\n\n"
+            "Я — твой внимательный помощник для вопросов, идей и повседневных задач.\n\n"
+            "Напиши сообщение, отправь голосовое, фото или документ — "
+            "а нужный раздел выбери в меню ниже."
+        )
+    else:
+        welcome_text = (
+            "✨ *Рада тебя видеть!*\n"
+            "Продолжим разговор или откроем нужный раздел?"
+        )
+
+    send_pretty_message(user_id, welcome_text, reply_markup=get_main_keyboard())
+
+
+def request_memory_clear(chat_id):
+    pending_memory_clear.add(chat_id)
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton(
+            text="Да, очистить", callback_data="confirm_clear"
+        ),
+        types.InlineKeyboardButton(text="Отмена", callback_data="cancel_clear"),
+    )
+    send_pretty_message(
+        chat_id,
+        "🧹 *Очистить историю разговора?*\n"
+        "Это удалит текущий контекст переписки. Настройки роли и голоса сохранятся.",
+        reply_markup=keyboard,
+    )
 
 
 def get_system_prompt(user_id):
@@ -107,7 +246,7 @@ def send_pretty_message(chat_id, text, reply_markup=None):
 # Новое: функция генерации и отправки картинки
 def generate_and_send_image(user_id, prompt_text):
     bot.send_chat_action(user_id, "upload_photo")
-    send_pretty_message(user_id, "🎨 *Рисую картинку, подожди 10–15 секунд...*")
+    send_pretty_message(user_id, "🎨 *Готовлю изображение…*")
 
     try:
         # Генерируем изображение через GPT image 2.6 в BotHub
@@ -137,41 +276,53 @@ def generate_and_send_image(user_id, prompt_text):
         os.remove(filename)
 
     except Exception as e:
-        send_pretty_message(user_id, f"⚠️ Не удалось создать картинку. Ошибка: `{e}`")
+        print(f"Image generation failed for user {user_id}: {e}")
+        send_pretty_message(
+            user_id,
+            "Не получилось подготовить изображение. Попробуй ещё раз "
+            "или измени описание.",
+        )
 
 
-@bot.message_handler(commands=["start", "help"])
+@bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.chat.id
-    user_histories[user_id] = [
-        {"role": "system", "content": get_system_prompt(user_id)}
-    ]
+    waiting_for_image_prompt.discard(user_id)
+    show_welcome(message, is_new_user=user_id not in user_histories)
 
-    welcome_text = (
-        "✨ *Привет! Я твой персональный ИИ-ассистент*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "Я работаю на базе *GPT 6 Luna* и умею:\n\n"
-        "💬 *Понимать текст* и помнить контекст нашего диалога\n"
-        "🎨 *Рисовать картинки* — нажми кнопку снизу или напиши «Нарисуй...»\n"
-        "🎤 *Слушать голосовые* и отвечать тебе живым голосом\n"
-        "👁 *Анализировать фото* — присылай скриншоты, документы или любые снимки\n"
-        "📄 *Читать PDF и Word* — присылай документы для анализа и выжимок\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 *Выбери действие на панели снизу или просто напиши мне!*"
+
+@bot.message_handler(commands=["help"])
+def help_message(message):
+    user_id = message.chat.id
+    waiting_for_image_prompt.discard(user_id)
+    if user_id not in user_histories:
+        user_histories[user_id] = [
+            {"role": "system", "content": get_system_prompt(user_id)}
+        ]
+    send_pretty_message(
+        user_id,
+        "✨ *Чем могу помочь*\n"
+        "Задавай вопросы, отправляй голосовые сообщения и фото, "
+        "создавай или редактируй изображения, присылай PDF, DOCX и TXT.\n\n"
+        "Выбери раздел в меню или просто продолжи переписку.",
+        reply_markup=get_main_keyboard(),
     )
-
-    send_pretty_message(user_id, welcome_text, reply_markup=get_main_keyboard())
 
 
 @bot.message_handler(commands=["clear"])
 def clear_memory(message):
     user_id = message.chat.id
-    user_histories[user_id] = [
-        {"role": "system", "content": get_system_prompt(user_id)}
+    request_memory_clear(user_id)
+
+
+def clear_memory_confirmed(chat_id):
+    user_histories[chat_id] = [
+        {"role": "system", "content": get_system_prompt(chat_id)}
     ]
+    pending_memory_clear.discard(chat_id)
     send_pretty_message(
-        user_id,
-        "🧹 *Память очищена!* Начинаем разговор с чистого листа.",
+        chat_id,
+        "🧹 *История очищена.* Настройки сохранены — можем начать новый разговор.",
         reply_markup=get_main_keyboard(),
     )
 
@@ -179,13 +330,17 @@ def clear_memory(message):
 @bot.message_handler(commands=["voice"])
 def switch_voice(message):
     user_id = message.chat.id
+    switch_voice_for_user(user_id)
+
+
+def switch_voice_for_user(user_id):
     current = user_voices.get(user_id, "nova")
     new_voice = "onyx" if current == "nova" else "nova"
     user_voices[user_id] = new_voice
     voice_name = "Мужской (Onyx)" if new_voice == "onyx" else "Женский (Nova)"
     send_pretty_message(
         user_id,
-        f"🎙 Голос озвучки переключён на: *{voice_name}*",
+        f"🎙 *Голос ответа изменён:* {voice_name}",
         reply_markup=get_main_keyboard(),
     )
 
@@ -195,37 +350,33 @@ def handle_text(message):
     user_id = message.chat.id
     text = message.text
 
-    if text == "✨ Что ты умеешь?":
-        start_message(message)
-        return
-    elif text == "🧹 Очистить память":
-        clear_memory(message)
-        return
-    elif text == "🎙 Сменить голос":
-        switch_voice(message)
-        return
-    elif text == "🎨 Нарисовать картинку":
+    # Совместимость со старыми подписями клавиатуры.
+    if text == "🎨 Нарисовать картинку":
         waiting_for_image_prompt.add(user_id)
         send_pretty_message(
             user_id,
-            "🖌 *Опиши словами, что именно нужно нарисовать?* (Например: _футуристичный сад на закате в стиле Pixar_)",
+            "🎨 *Опиши изображение, которое хочешь создать.*\n"
+            "Например: уютная оранжерея в мягком утреннем свете.",
         )
         return
-    elif text == "🎭 Сменить роль":
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        buttons = [
-            types.InlineKeyboardButton(text=info["name"], callback_data=f"role_{key}")
-            for key, info in ROLES.items()
-        ]
-        markup.add(*buttons)
-        current_role = ROLES[user_roles.get(user_id, "default")]["name"]
-        send_pretty_message(
-            user_id,
-            f"🎭 *Текущий режим:* {current_role}\n\nВыбери новую роль для бота:",
-            reply_markup=markup,
-        )
+    elif text == "🎙 Сменить голос":
+        waiting_for_image_prompt.discard(user_id)
+        switch_voice(message)
         return
 
+    section = LEGACY_MENU_LABELS.get(text, text)
+    if section in MAIN_MENU_LABELS:
+        waiting_for_image_prompt.discard(user_id)
+        if section == "✨ Помощник" and text == "✨ Что ты умеешь?":
+            show_welcome(message)
+        else:
+            show_section(user_id, section)
+        return
+
+    if text == "🧹 Очистить память":
+        waiting_for_image_prompt.discard(user_id)
+        clear_memory(message)
+        return
     # Если пользователь до этого нажал кнопку «Нарисовать картинку»
     if user_id in waiting_for_image_prompt:
         waiting_for_image_prompt.remove(user_id)
@@ -239,6 +390,7 @@ def handle_text(message):
         return
 
     bot.send_chat_action(user_id, "typing")
+    send_pretty_message(user_id, "Формирую ответ…")
     answer = ask_claude(user_id, text)
     send_pretty_message(user_id, answer)
 
@@ -247,6 +399,7 @@ def handle_text(message):
 def handle_voice(message):
     user_id = message.chat.id
     bot.send_chat_action(user_id, "typing")
+    send_pretty_message(user_id, "🎙 *Распознаю голосовое сообщение…*")
 
     file_info = bot.get_file(message.voice.file_id)
     downloaded_file = bot.download_file(file_info.file_path)
@@ -269,6 +422,7 @@ def handle_voice(message):
         generate_and_send_image(user_id, recognized_text[8:].strip())
         return
 
+    send_pretty_message(user_id, "Формирую ответ…")
     answer = ask_claude(user_id, recognized_text)
     send_pretty_message(user_id, answer)
 
@@ -297,7 +451,7 @@ def handle_photo(message):
     if user_caption.lower().strip().startswith(edit_triggers):
         bot.send_chat_action(user_id, "upload_photo")
         send_pretty_message(
-            user_id, "🪄 *Редактирую фотографию, подожди 10–15 секунд...*"
+            user_id, "🪄 *Обрабатываю фотографию…*"
         )
 
         try:
@@ -343,13 +497,17 @@ def handle_photo(message):
         except Exception as e:
             if os.path.exists(f"edit_in_{user_id}.png"):
                 os.remove(f"edit_in_{user_id}.png")
+            print(f"Photo editing failed for user {user_id}: {e}")
             send_pretty_message(
-                user_id, f"⚠️ Не удалось отредактировать фото. Ошибка: `{e}`"
+                user_id,
+                "Не получилось обработать фотографию. Проверь подпись к фото "
+                "и попробуй ещё раз.",
             )
         return
 
     # Обычный режим: если триггерных слов нет — просто анализируем картинку
     bot.send_chat_action(user_id, "typing")
+    send_pretty_message(user_id, "🎨 *Обрабатываю фотографию…*")
     file_info = bot.get_file(message.photo[-1].file_id)
     downloaded_file = bot.download_file(file_info.file_path)
     base64_image = base64.b64encode(downloaded_file).decode("utf-8")
@@ -400,12 +558,13 @@ def handle_document(message):
     if ext not in [".pdf", ".docx", ".txt"]:
         send_pretty_message(
             user_id,
-            "⚠️ Пока я умею читать только файлы форматов *PDF*, *Word (.docx)* и *TXT*.",
+            "Пока я читаю документы PDF, DOCX и TXT. "
+            "Пришли файл в одном из этих форматов.",
         )
         return
 
     bot.send_chat_action(user_id, "typing")
-    send_pretty_message(user_id, f"📄 *Читаю документ «{file_name}»...*")
+    send_pretty_message(user_id, f"📄 *Изучаю документ «{file_name}»…*")
 
     try:
         # 1. Скачиваем файл из Telegram
@@ -435,7 +594,8 @@ def handle_document(message):
         if not extracted_text.strip():
             send_pretty_message(
                 user_id,
-                "⚠️ Не удалось найти текст в этом файле (возможно, это скан в виде картинки).",
+                "Не удалось извлечь текст из документа. Возможно, это скан "
+                "или файл не содержит текстового слоя.",
             )
             return
 
@@ -455,28 +615,72 @@ def handle_document(message):
         )
         full_message = f"Пользователь загрузил документ «{file_name}». Вот его содержимое:\n\n{short_text}\n\nЗадание пользователя: {user_prompt}"
 
+        send_pretty_message(user_id, "Формирую ответ…")
         answer = ask_claude(user_id, full_message)
         send_pretty_message(user_id, answer)
 
     except Exception as e:
-        send_pretty_message(user_id, f"⚠️ Ошибка при чтении файла: `{e}`")
+        print(f"Document processing failed for user {user_id}: {e}")
+        send_pretty_message(
+            user_id,
+            "Не получилось прочитать документ. Проверь файл и попробуй отправить его ещё раз.",
+        )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("role_"))
 def callback_role(call):
     user_id = call.message.chat.id
+    waiting_for_image_prompt.discard(user_id)
     role_key = call.data.replace("role_", "")
     user_roles[user_id] = role_key
-    user_histories[user_id] = [
-        {"role": "system", "content": get_system_prompt(user_id)}
-    ]
+    if user_id not in user_histories:
+        user_histories[user_id] = [
+            {"role": "system", "content": get_system_prompt(user_id)}
+        ]
+    else:
+        user_histories[user_id][0] = {
+            "role": "system",
+            "content": get_system_prompt(user_id),
+        }
 
     role_name = ROLES[role_key]["name"]
     bot.answer_callback_query(call.id, f"Выбрана роль: {role_name}")
     send_pretty_message(
         user_id,
-        f"✅ *Режим переключён на:* {role_name}\nПамять обновлена под новую задачу!",
+        f"✅ *Режим изменён:* {role_name}\nКонтекст разговора сохранён.",
+        reply_markup=get_main_keyboard(),
     )
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("settings_")
+    or call.data in {"confirm_clear", "cancel_clear"}
+)
+def callback_settings(call):
+    user_id = call.message.chat.id
+
+    if call.data == "settings_voice":
+        switch_voice_for_user(user_id)
+    elif call.data == "settings_clear":
+        request_memory_clear(user_id)
+    elif call.data == "confirm_clear":
+        if user_id in pending_memory_clear:
+            clear_memory_confirmed(user_id)
+        else:
+            send_pretty_message(
+                user_id,
+                "Запрос на очистку уже закрыт. История разговора не изменена.",
+                reply_markup=get_main_keyboard(),
+            )
+    elif call.data == "cancel_clear":
+        pending_memory_clear.discard(user_id)
+        send_pretty_message(
+            user_id,
+            "Очистка отменена. История и настройки сохранены.",
+            reply_markup=get_main_keyboard(),
+        )
+
+    bot.answer_callback_query(call.id)
 
 
 print("Мультимодальный бот с генерацией картинок запущен!")
