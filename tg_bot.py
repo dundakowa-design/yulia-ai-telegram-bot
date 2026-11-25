@@ -1,3 +1,21 @@
+import socket
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(*args, **kwargs):
+    return [r for r in _orig_getaddrinfo(*args, **kwargs) if r[0] == socket.AF_INET]
+socket.getaddrinfo = _ipv4_getaddrinfo
+import urllib3.util.connection as urllib3_cn
+_orig_create_conn = urllib3_cn.create_connection
+def _mss_create_connection(address, *args, **kwargs):
+    sock = _orig_create_conn(address, *args, **kwargs)
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 1300)
+    except Exception:
+        pass
+    return sock
+urllib3_cn.create_connection = _mss_create_connection
+
+
+
 import os
 import base64
 import logging
@@ -16,7 +34,7 @@ apihelper.API_URL = "https://tg-proxy.dundakowa.workers.dev/bot{0}/{1}"
 # TeleBot formats file downloads through FILE_URL using the same bot token and
 # file_path returned by get_file (e.g. /file/bot<TOKEN>/<file_path>).
 apihelper.FILE_URL = "https://tg-proxy.dundakowa.workers.dev/file/bot{0}/{1}"
-apihelper.CONNECT_TIMEOUT = 10
+apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 60
 
 logging.basicConfig(
@@ -57,6 +75,9 @@ IMAGE_GENERATION_TRIGGERS = (
     "сгенерируй рисунок",
     "сгенерируй фото",
     "создай изображение",
+    "создай фото",
+    "создай фотографию",
+    "сделай фото",
     "создай картинку",
     "создай рисунок",
     "сделай изображение",
@@ -83,14 +104,9 @@ def extract_image_prompt(text):
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(
-        types.KeyboardButton("✨ Помощник"),
-        types.KeyboardButton("🎨 Фото и дизайн"),
+        types.KeyboardButton("🧹 Очистить память"),
+        types.KeyboardButton("⚙️ Настройки"),
     )
-    keyboard.row(
-        types.KeyboardButton("🎙 Голос"),
-        types.KeyboardButton("📄 Документы"),
-    )
-    keyboard.row(types.KeyboardButton("⚙️ Настройки"))
     return keyboard
 
 
@@ -244,6 +260,44 @@ def download_telegram_file(file_path):
 
 
 # Новое: функция генерации и отправки картинки
+from PIL import Image
+import io
+
+def upload_to_temp_host(jpeg_bytes):
+    hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    # 1. Пробуем catbox.moe с User-Agent
+    try:
+        r1 = apihelper.requests.post(
+            "https://" + "catbox.moe" + "/user/api.php",
+            data={"reqtype": "fileupload"},
+            files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
+            headers=hdrs,
+            timeout=15,
+        )
+        if r1.status_code == 200 and r1.text.strip().startswith("http"):
+            return r1.text.strip()
+    except Exception:
+        pass
+    # 2. Запасной вариант: freeimage.host
+    r2 = apihelper.requests.post(
+        "https://" + "freeimage.host" + "/api/1/upload?key=6d207e02198a847aa98d0a2a901485a5",
+        files={"source": ("image.jpg", jpeg_bytes, "image/jpeg")},
+        headers=hdrs,
+        timeout=15,
+    )
+    r2.raise_for_status()
+    return r2.json()["image"]["url"]
+
+
+def compress_image_bytes(raw_bytes, max_side=768, quality=72):
+    img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    buf.seek(0)
+    buf.name = "image.jpg"
+    return buf
+
 def generate_and_send_image(user_id, prompt_text):
     bot.send_chat_action(user_id, "upload_photo")
     send_pretty_message(user_id, "🎨 *Готовлю изображение…*")
@@ -251,32 +305,37 @@ def generate_and_send_image(user_id, prompt_text):
     try:
         # Генерируем изображение через GPT image 2.6 в BotHub
         img_response = client.images.generate(
-            model="gpt-image-2.6", prompt=prompt_text, size="1024x1024", n=1
+            model="seedream-5-0-flash", prompt=prompt_text, size="1024x1024", n=1
         )
 
         image_data = img_response.data[0]
         filename = f"gen_{user_id}.png"
 
-        # Если сервер вернул ссылку (url) — скачиваем картинку по ссылке
-        if getattr(image_data, "url", None):
-            urllib.request.urlretrieve(image_data.url, filename)
-        # Если вернул сразу в коде base64 — сохраняем из base64
-        elif getattr(image_data, "b64_json", None):
-            with open(filename, "wb") as f:
-                f.write(base64.b64decode(image_data.b64_json))
-
-        with open(filename, "rb") as photo_file:
-            bot.send_photo(
-                user_id,
-                photo_file,
-                caption=f"✨ Готово! Запрос: _{prompt_text}_",
-                parse_mode="Markdown",
-            )
-
-        os.remove(filename)
+        caption_text = f"✨ Готово! Запрос: _{prompt_text}_"
+        if getattr(image_data, "b64_json", None):
+            photo_buf = compress_image_bytes(base64.b64decode(image_data.b64_json))
+            temp_url = upload_to_temp_host(photo_buf.getvalue())
+            bot.send_photo(user_id, temp_url, caption=caption_text, parse_mode="Markdown")
+        elif getattr(image_data, "url", None):
+            try:
+                bot.send_photo(user_id, image_data.url, caption=caption_text, parse_mode="Markdown")
+            except Exception:
+                resp = apihelper.requests.get(
+                    image_data.url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=90,
+                )
+                resp.raise_for_status()
+                with open(filename, "wb") as f:
+                    f.write(resp.content)
+                with open(filename, "rb") as photo_file:
+                    bot.send_photo(user_id, photo_file, caption=caption_text, parse_mode="Markdown")
+                os.remove(filename)
+        else:
+            raise ValueError("Empty image response from API")
 
     except Exception as e:
-        print(f"Image generation failed for user {user_id}: {e}")
+        logging.exception(f"Image generation failed for user {user_id}: {e}")
         send_pretty_message(
             user_id,
             "Не получилось подготовить изображение. Попробуй ещё раз "
@@ -443,14 +502,14 @@ def handle_photo(message):
     output_filename = f"edit_out_{user_id}.png"
 
     # Проверяем, просит ли пользователь отредактировать картинку по ключевым словам
-    edit_triggers = ("измени", "замени", "убери", "удали", "отредактируй", "сделай фон")
+    edit_triggers = ("измени", "замени", "убери", "удали", "отредактируй", "сделай", "преврати", "перерисуй", "добавь")
     if user_caption.lower().strip().startswith(edit_triggers):
         try:
             bot.send_chat_action(user_id, "upload_photo")
             send_pretty_message(user_id, "🪄 *Обрабатываю фотографию…*")
 
             # get_file and the timed download both use the configured Workers proxy.
-            file_info = bot.get_file(message.photo[-1].file_id)
+            file_info = bot.get_file(message.photo[0].file_id)
             downloaded_file = download_telegram_file(file_info.file_path)
             if not downloaded_file:
                 raise ValueError("Telegram returned an empty photo file")
@@ -461,7 +520,7 @@ def handle_photo(message):
             # 2. Отправляем фото и задачу в модель GPT Image 2.6 для редактирования
             with open(input_filename, "rb") as image_file:
                 edit_response = client.images.edit(
-                    model="gpt-image-2.6",
+                    model="seedream-5-0-flash",
                     image=image_file,
                     prompt=user_caption,
                     size="1024x1024",
@@ -479,12 +538,14 @@ def handle_photo(message):
                 raise ValueError("Image API returned neither URL nor image data")
 
             with open(output_filename, "rb") as out_photo:
-                bot.send_photo(
-                    user_id,
-                    out_photo,
-                    caption=f"✨ Готово! Задача: _{user_caption}_",
-                    parse_mode="Markdown",
-                )
+                photo_buf = compress_image_bytes(out_photo.read())
+            temp_url = upload_to_temp_host(photo_buf.getvalue())
+            bot.send_photo(
+                user_id,
+                temp_url,
+                caption=f"✨ Готово! Задача: _{user_caption}_",
+                parse_mode="Markdown",
+            )
 
         except Exception as e:
             logger.exception("Photo editing failed for user %s: %s", user_id, e)
@@ -510,7 +571,7 @@ def handle_photo(message):
         bot.send_chat_action(user_id, "typing")
         send_pretty_message(user_id, "🎨 *Обрабатываю фотографию…*")
 
-        file_info = bot.get_file(message.photo[-1].file_id)
+        file_info = bot.get_file(message.photo[0].file_id)
         downloaded_file = download_telegram_file(file_info.file_path)
         if not downloaded_file:
             raise ValueError("Telegram returned an empty photo file")
