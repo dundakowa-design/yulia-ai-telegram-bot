@@ -1,3 +1,4 @@
+from stats_card import build_stats_card
 import socket
 socket.setdefaulttimeout(12)
 import io
@@ -756,7 +757,33 @@ def stats_command(message):
             lines.append(f"  • {label}: {cnt} запр. (~{u_spent:,} CAPS / ~{u_rub} ₽)")
 
     report = NL.join(lines).replace(",", " ")
-    send_pretty_message(user_id, report)
+    card_buf = build_stats_card(
+        rem_caps, rem_rub, uniq_users or 0, total_reqs or 0,
+        total_tokens or 0, img_cnt or 0, vis_cnt or 0, txt_cnt or 0
+    )
+    if card_buf:
+        cap_lines = ["*Расход по пользователям:*"]
+        if not recent_users:
+            cap_lines.append("  • _Пока нет запросов_")
+        else:
+            for uid, uname, fname, cnt, utok, uimg in recent_users:
+                label = f"@{uname}" if uname else (fname or str(uid))
+                u_spent = int(round((utok or 0) * COST_PER_TOKEN + (uimg or 0) * COST_PER_IMAGE))
+                u_rub = round(u_spent * 0.0002, 2)
+                cap_lines.append(f"  • {label}: {cnt} запр. (~{u_spent:,} CAPS / ~{u_rub} ₽)")
+        caption_txt = NL.join(cap_lines).replace(",", " ")
+        try:
+            try:
+                card_url = upload_to_temp_host(card_buf.getvalue())
+                bot.send_photo(user_id, card_url, caption=caption_txt, parse_mode="Markdown")
+            except Exception:
+                card_buf.seek(0)
+                bot.send_photo(user_id, card_buf, caption=caption_txt, parse_mode="Markdown")
+        except Exception as _card_err:
+            logger.warning("Stats card send failed, fallback to text: %s", _card_err)
+            send_pretty_message(user_id, report)
+    else:
+        send_pretty_message(user_id, report)
 
 @bot.message_handler(commands=["balance"])
 def set_balance_command(message):
@@ -1110,7 +1137,9 @@ def callback_settings(call):
 print("Мультимодальный бот с генерацией картинок запущен!")
 while True:
     try:
-        bot.polling(none_stop=True, interval=1.0, timeout=5, long_polling_timeout=0)
+        telebot.apihelper.CONNECT_TIMEOUT = 20
+        telebot.apihelper.READ_TIMEOUT = 45
+        bot.polling(none_stop=True, interval=1.0, timeout=30, long_polling_timeout=25)
     except Exception as _pe:
         logger.warning("Polling reconnect: %s", _pe)
         import time as _pt; _pt.sleep(0.5)
