@@ -210,13 +210,160 @@ def request_memory_clear(chat_id):
     )
 
 
+import sqlite3
+
+ADMIN_ID = 826172970
+STATS_DB = "bot_stats.db"
+
+def init_stats_db():
+    conn = sqlite3.connect(STATS_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            action_type TEXT,
+            tokens_used INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def log_usage(user_id, action_type, tokens_used=0, username=None, first_name=None):
+    try:
+        conn = sqlite3.connect(STATS_DB)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO usage_logs (user_id, username, first_name, action_type, tokens_used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username or "", first_name or "", action_type, int(tokens_used or 0), now_str),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("Stats log error: %s", e)
+
+init_stats_db()
+
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+
+def fetch_url_text(url, max_chars=6000):
+    try:
+        hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = apihelper.requests.get(url, headers=hdrs, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        lines = [line.strip() for line in soup.get_text(separator="\n").splitlines() if line.strip()]
+        text = "\n".join(lines)
+        return text[:max_chars] if text else "Не удалось извлечь текст со страницы."
+    except Exception as e:
+        return f"Ошибка при загрузке ссылки: {e}"
+
+def search_web_info(query, max_results=5):
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, region="ru-ru", max_results=max_results))
+        if not results:
+            return "По запросу ничего не найдено."
+        formatted = []
+        for idx, item in enumerate(results, 1):
+            formatted.append(f"{idx}. {item.get('title', '')}\n{item.get('body', '')}\nИсточник: {item.get('href', '')}")
+        return "\n\n".join(formatted)
+    except Exception as e:
+        return f"Ошибка веб-поиска: {e}"
+
 def get_system_prompt():
     today = datetime.now().strftime("%d.%m.%Y, время %H:%M")
     return f"""Ты — Yulia AI, персональный мультимодальный ИИ-ассистент в Telegram. Всегда представляйся только как Yulia AI; никогда не называй себя ChatGPT или OpenAI.
-Автоматически определяй задачу пользователя: написание или отладка кода, работа с текстом, аналитика, обучение, творчество или бытовой вопрос. Самостоятельно выбирай наиболее подходящий стиль и глубину ответа — переключать режимы не нужно. Для кода давай точные, работающие решения; для обучения объясняй понятно; для аналитики структурируй выводы; для текстов учитывай цель и аудиторию; для творчества предлагай оригинальные идеи; на бытовые вопросы отвечай практично и дружелюбно. Учитывай контекст переписки и содержимое присланных изображений и документов.
+Автоматически определяй задачу пользователя: написание или отладка кода, работа с текстом, аналитика, обучение, творчество или бытовой вопрос. Самостоятельно выбирай наиболее подходящий стиль и глубину ответа — переключать режимы не нужно. Для кода давай точные, работающие решения; для обучения объясняй понятно; для аналитики структурируй выводы; для текстов учитывай цель и аудиторию; для творчества предлагай оригинальные идеи; на бытовые вопросы отвечай практично и дружелюбно. Учитывай контекст переписки и содержимое присланных изображений и документов. У тебя есть активные инструменты: generate_image (для создания и рисования любых изображений по просьбе пользователя), web_search (для поиска актуальной погоды, курсов валют, новостей и фактов в интернете в реальном времени) и read_webpage (для чтения текста по любым ссылкам). Всегда используй эти инструменты, когда пользователь просит актуальные данные из сети, пересказ ссылки или изображение — никогда не отвечай, что у тебя нет доступа в интернет или ты не умеешь создавать картинки.
 Сегодняшняя дата и время: {today}.
 Оформляй ответы понятно: используй *одинарные звёздочки* для жирного шрифта, списки и эмодзи, когда это уместно. Не используй решётки ## или ### для заголовков."""
 
+
+BOT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Создать, нарисовать, сгенерировать или визуализировать любое изображение, фото, арт, открытку, логотип по просьбе пользователя.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Подробное и красочное описание изображения на английском или русском языке.",
+                    }
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Найти актуальную информацию в интернете: свежие новости, погоду, курсы валют, расписания, цены и события.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос для поиска в интернете.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_webpage",
+            "description": "Открыть веб-страницу по URL-ссылке из сообщения пользователя и прочитать её текстовое содержимое.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Полный URL-адрес страницы (начинающийся с http:// или https://).",
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+
+import threading
+from contextlib import contextmanager
+
+@contextmanager
+def keep_typing(chat_id, action="typing"):
+    stop_event = threading.Event()
+    def _worker():
+        while not stop_event.is_set():
+            try:
+                bot.send_chat_action(chat_id, action)
+            except Exception:
+                pass
+            stop_event.wait(4.0)
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
 
 def ask_claude(user_id, user_text):
     if user_id not in user_histories:
@@ -227,10 +374,72 @@ def ask_claude(user_id, user_text):
     user_histories[user_id].append({"role": "user", "content": user_text})
 
     response = client.chat.completions.create(
-        model="gpt-6-luna", messages=user_histories[user_id]
+        model="gpt-6-luna",
+        messages=user_histories[user_id],
+        tools=BOT_TOOLS,
+        tool_choice="auto",
     )
+    used_tokens = getattr(getattr(response, "usage", None), "total_tokens", 0)
+    log_usage(user_id, "text", used_tokens)
 
-    answer = response.choices[0].message.content
+    msg = response.choices[0].message
+    tool_calls = getattr(msg, "tool_calls", None)
+
+    if tool_calls:
+        import json as _json
+        call = tool_calls[0]
+        fn_name = call.function.name
+        try:
+            args = _json.loads(call.function.arguments or "{}")
+        except Exception:
+            args = {}
+
+        if fn_name == "generate_image":
+            img_prompt = args.get("prompt") or user_text
+            generate_and_send_image(user_id, img_prompt)
+            user_histories[user_id].append({"role": "assistant", "content": f"[Сгенерировано изображение: {img_prompt}]"})
+            return None
+
+        if fn_name == "web_search":
+            q = args.get("query") or user_text
+            bot.send_chat_action(user_id, "typing")
+            tool_result = search_web_info(q)
+        elif fn_name == "read_webpage":
+            u = args.get("url") or ""
+            bot.send_chat_action(user_id, "typing")
+            tool_result = fetch_url_text(u)
+        else:
+            tool_result = "Инструмент не найден."
+
+        msgs_with_tool = user_histories[user_id] + [
+            {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {"name": fn_name, "arguments": call.function.arguments},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": tool_result,
+            },
+        ]
+        second_resp = client.chat.completions.create(
+            model="gpt-6-luna",
+            messages=msgs_with_tool,
+        )
+        used_tokens_2 = getattr(getattr(second_resp, "usage", None), "total_tokens", 0)
+        log_usage(user_id, "text", used_tokens_2)
+        answer = second_resp.choices[0].message.content
+        user_histories[user_id].append({"role": "assistant", "content": answer})
+        return answer
+
+    answer = msg.content
     user_histories[user_id].append({"role": "assistant", "content": answer})
     return answer
 
@@ -299,7 +508,6 @@ def compress_image_bytes(raw_bytes, max_side=768, quality=72):
     return buf
 
 def generate_and_send_image(user_id, prompt_text):
-    bot.send_chat_action(user_id, "upload_photo")
     send_pretty_message(user_id, "🎨 *Готовлю изображение…*")
 
     try:
@@ -316,6 +524,7 @@ def generate_and_send_image(user_id, prompt_text):
             photo_buf = compress_image_bytes(base64.b64decode(image_data.b64_json))
             temp_url = upload_to_temp_host(photo_buf.getvalue())
             bot.send_photo(user_id, temp_url, caption=caption_text, parse_mode="Markdown")
+            log_usage(user_id, "image_gen", 0)
         elif getattr(image_data, "url", None):
             try:
                 bot.send_photo(user_id, image_data.url, caption=caption_text, parse_mode="Markdown")
@@ -343,9 +552,90 @@ def generate_and_send_image(user_id, prompt_text):
         )
 
 
+@bot.message_handler(commands=["stats"])
+def stats_command(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    conn = sqlite3.connect(STATS_DB)
+    cur = conn.cursor()
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
+    total_users = cur.execute("SELECT COUNT(DISTINCT user_id) FROM usage_logs").fetchone()[0]
+    total_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type != 'visit'").fetchone()[0]
+    today_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE created_at LIKE ? AND action_type != 'visit'", (f"{today_prefix}%",)).fetchone()[0]
+    total_tokens = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs").fetchone()[0]
+    by_type = cur.execute("SELECT action_type, COUNT(*) FROM usage_logs WHERE action_type != 'visit' GROUP BY action_type").fetchall()
+    top_users = cur.execute("""
+        SELECT user_id, MAX(username), MAX(first_name), COUNT(*), COALESCE(SUM(tokens_used), 0)
+        FROM usage_logs
+        GROUP BY user_id
+        ORDER BY MAX(id) DESC
+        LIMIT 10
+    """).fetchall()
+    conn.close()
+
+    type_labels = {
+        "text": "💬 Текст",
+        "image_gen": "🎨 Генерация фото",
+        "image_edit": "🪄 Редактирование фото",
+        "image_vision": "👁 Анализ фото",
+    }
+    types_str = "\n".join([f"• {type_labels.get(k, k)}: *{v}*" for k, v in by_type]) or "• Пока нет запросов"
+    users_lines = []
+    for uid, uname, fname, cnt, toks in top_users:
+        tag = f"@{uname}" if uname else (fname or str(uid))
+        users_lines.append(f"• {tag} (`{uid}`): *{cnt}* действ., {toks} ток.")
+    users_str = "\n".join(users_lines) or "• Пока пусто"
+
+    conn2 = sqlite3.connect(STATS_DB)
+    c2 = conn2.cursor()
+    row_bal = c2.execute("SELECT value FROM bot_settings WHERE key = 'base_caps'").fetchone()
+    row_ts = c2.execute("SELECT value FROM bot_settings WHERE key = 'base_caps_ts'").fetchone()
+    balance_line = "💰 Баланс BotHub: _задай через_ `/balance число`"
+    if row_bal and row_ts:
+        base_caps = float(row_bal)
+        base_ts = row_ts
+        toks_since = c2.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs WHERE created_at >= ?", (base_ts,)).fetchone()
+        imgs_since = c2.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type IN ('image_gen', 'image_edit') AND created_at >= ?", (base_ts,)).fetchone()
+        # Оценочный расход: ~15 CAPS за 1 токен gpt-6-luna + ~12000 CAPS за 1 картинку seedream-5-0-flash
+        est_spent = toks_since * 15 + imgs_since * 12000
+        est_left = max(0, int(base_caps - est_spent))
+        balance_line = f"💰 Ориентировочный остаток: *~{est_left:,} CAPS*".replace(",", " ")
+    conn2.close()
+
+    report = (
+        f"📊 *Статистика Yulia AI*\n\n"
+        f"{balance_line}\n"
+        f"👥 Уникальных пользователей: *{total_users}*\n"
+        f"⚡ Запросов сегодня / всего: *{today_reqs}* / *{total_reqs}*\n"
+        f"🧮 Текстовых токенов учтено: *{total_tokens}*\n\n"
+        f"*По типам задач:*\n{types_str}\n\n"
+        f"*Последние пользователи:*\n{users_str}"
+    )
+    send_pretty_message(message.chat.id, report)
+
+
+@bot.message_handler(commands=["balance"])
+def set_balance_command(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        send_pretty_message(message.chat.id, "Укажи текущий баланс CAPS числом, например: `/balance 2732524`")
+        return
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(STATS_DB)
+    conn.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('base_caps', ?)", (parts[1],))
+    conn.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('base_caps_ts', ?)", (now_str,))
+    conn.commit()
+    conn.close()
+    val_fmt = f"{int(parts[1]):,}".replace(",", " ")
+    send_pretty_message(message.chat.id, f"✅ Стартовый баланс зафиксирован: *{val_fmt} CAPS*. Теперь `/stats` будет автоматически считать остаток!")
+
+
 @bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.chat.id
+    log_usage(user_id, "visit", 0, message.from_user.username, message.from_user.first_name)
     show_welcome(message, is_new_user=user_id not in user_histories)
 
 
@@ -423,22 +713,18 @@ def handle_text(message):
         clear_memory(message)
         return
 
-    prompt_text = extract_image_prompt(text)
-    if prompt_text is not None:
-        if not prompt_text:
-            send_pretty_message(
-                user_id,
-                "🎨 Опиши изображение, которое хочешь создать — например, "
-                "«Нарисуй уютную оранжерею в мягком утреннем свете».",
-            )
-            return
-        generate_and_send_image(user_id, prompt_text)
-        return
-
-    bot.send_chat_action(user_id, "typing")
-    send_pretty_message(user_id, "Формирую ответ…")
-    answer = ask_claude(user_id, text)
-    send_pretty_message(user_id, answer)
+    log_usage(user_id, "visit", 0, getattr(message.from_user, "username", None), getattr(message.from_user, "first_name", None))
+    try:
+        with keep_typing(user_id, "typing"):
+            answer = ask_claude(user_id, text)
+        if answer:
+            send_pretty_message(user_id, answer)
+    except Exception as e:
+        logger.exception("Text message handling failed for user %s: %s", user_id, e)
+        try:
+            send_pretty_message(user_id, "⚠️ Связь с нейросетью на секунду прервалась. Попробуй отправить сообщение ещё раз!")
+        except Exception:
+            pass
 
 
 @bot.message_handler(content_types=["voice"])
@@ -463,16 +749,9 @@ def handle_voice(message):
     send_pretty_message(user_id, f"🎤 *Ты сказала:* _{recognized_text}_")
     os.remove(voice_filename)
 
-    prompt_text = extract_image_prompt(recognized_text)
-    if prompt_text is not None:
-        if not prompt_text:
-            send_pretty_message(user_id, "Опиши, какое изображение нужно создать.")
-            return
-        generate_and_send_image(user_id, prompt_text)
-        return
-
-    send_pretty_message(user_id, "Формирую ответ…")
     answer = ask_claude(user_id, recognized_text)
+    if not answer:
+        return
     send_pretty_message(user_id, answer)
 
     bot.send_chat_action(user_id, "record_voice")
@@ -546,6 +825,7 @@ def handle_photo(message):
                 caption=f"✨ Готово! Задача: _{user_caption}_",
                 parse_mode="Markdown",
             )
+            log_usage(user_id, "image_edit", 0)
 
         except Exception as e:
             logger.exception("Photo editing failed for user %s: %s", user_id, e)
@@ -602,6 +882,8 @@ def handle_photo(message):
             + [{"role": "user", "content": image_message}],
         )
 
+        used_vis = getattr(getattr(response, "usage", None), "total_tokens", 0)
+        log_usage(user_id, "image_vision", used_vis)
         answer = response.choices[0].message.content
         user_histories[user_id].append(
             {"role": "user", "content": f"[Пользователь отправил фото: {analysis_prompt}]"}
