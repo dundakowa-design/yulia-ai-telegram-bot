@@ -1,3 +1,5 @@
+import io
+from PIL import Image
 import socket
 _orig_getaddrinfo = socket.getaddrinfo
 def _ipv4_getaddrinfo(*args, **kwargs):
@@ -374,7 +376,7 @@ def ask_claude(user_id, user_text):
     user_histories[user_id].append({"role": "user", "content": user_text})
 
     response = client.chat.completions.create(
-        model="gpt-6-luna",
+        model="gemini-2.5-flash",
         messages=user_histories[user_id],
         tools=BOT_TOOLS,
         tool_choice="auto",
@@ -430,7 +432,7 @@ def ask_claude(user_id, user_text):
             },
         ]
         second_resp = client.chat.completions.create(
-            model="gpt-6-luna",
+            model="gemini-2.5-flash",
             messages=msgs_with_tool,
         )
         used_tokens_2 = getattr(getattr(second_resp, "usage", None), "total_tokens", 0)
@@ -444,33 +446,70 @@ def ask_claude(user_id, user_text):
     return answer
 
 
-def send_pretty_message(chat_id, text, reply_markup=None):
-    try:
-        bot.send_message(
-            chat_id, text, parse_mode="Markdown", reply_markup=reply_markup
-        )
-    except apihelper.ApiTelegramException as error:
-        if "can't parse entities" not in error.description.lower():
+def _send_single_chunk(chat_id, chunk, reply_markup=None):
+    import time as _time, re as _re
+    chunk = _re.sub(r'(?m)^#{1,6}\s*', '', chunk)
+    for attempt in range(3):
+        try:
+            bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=reply_markup)
+            return
+        except apihelper.ApiTelegramException as error:
+            if "can't parse entities" in error.description.lower():
+                bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+                return
             raise
-        bot.send_message(chat_id, text, reply_markup=reply_markup)
+        except Exception:
+            if attempt == 2:
+                raise
+            _time.sleep(1.0)
+
+
+def send_pretty_message(chat_id, text, reply_markup=None):
+    if not text:
+        return
+    max_len = 1200
+    if len(text) <= max_len:
+        _send_single_chunk(chat_id, text, reply_markup=reply_markup)
+        return
+    parts = []
+    remaining = text
+    while len(remaining) > max_len:
+        split_at = remaining.rfind("\n\n", 0, max_len)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        parts.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    for idx, part in enumerate(parts):
+        if part:
+            _send_single_chunk(chat_id, part, reply_markup=reply_markup if idx == len(parts) - 1 else None)
+            import time as _t; _t.sleep(0.35)
 
 
 def download_telegram_file(file_path):
-    """Download a Telegram file via the configured proxy with bounded timeouts."""
+    """Download a Telegram file in small 15KB HTTP Range chunks to bypass ISP throttling on workers.dev."""
     file_url = apihelper.FILE_URL.format(bot.token, file_path)
-    response = apihelper.requests.get(
-        file_url,
-        timeout=(apihelper.CONNECT_TIMEOUT, apihelper.READ_TIMEOUT),
-        proxies=apihelper.proxy,
-    )
-    if response.status_code != 200:
-        raise apihelper.ApiHTTPException("Download file", response)
-    return response.content
-
-
-# Новое: функция генерации и отправки картинки
-from PIL import Image
-import io
+    chunks = []
+    offset = 0
+    step = 15360
+    while True:
+        hdrs = {"Range": f"bytes={offset}-{offset + step - 1}"}
+        r = apihelper.requests.get(file_url, headers=hdrs, timeout=(10, 15))
+        if r.status_code not in (200, 206):
+            if offset == 0:
+                raise RuntimeError(f"Download failed with status {r.status_code}")
+            break
+        data = r.content
+        if not data:
+            break
+        chunks.append(data)
+        if r.status_code == 200 or len(data) < step:
+            break
+        offset += len(data)
+    return b"".join(chunks)
 
 def upload_to_temp_host(jpeg_bytes):
     hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -497,6 +536,43 @@ def upload_to_temp_host(jpeg_bytes):
     r2.raise_for_status()
     return r2.json()["image"]["url"]
 
+
+def build_vision_content(raw_bytes, prompt_text):
+    img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    w, h = img.size
+    images_b64 = []
+
+    # Если это длинный телефонный скриншот — нарезаем внахлест на 2-3 крупных фрагмента + общий план
+    if h > w * 1.45:
+        # Общий вид (чтобы модель видела структуру и рисунки целиком)
+        full_copy = img.copy()
+        full_copy.thumbnail((1400, 2200))
+        b_full = io.BytesIO()
+        full_copy.save(b_full, format="JPEG", quality=88)
+        images_b64.append(base64.b64encode(b_full.getvalue()).decode("utf-8"))
+
+        # Крупные перекрывающиеся фрагменты сверху вниз
+        step = int(h * 0.45)
+        slice_h = int(h * 0.58)
+        for top in range(0, h - int(h * 0.15), step):
+            bottom = min(h, top + slice_h)
+            crop = img.crop((0, top, w, bottom))
+            b_crop = io.BytesIO()
+            crop.save(b_crop, format="JPEG", quality=92)
+            images_b64.append(base64.b64encode(b_crop.getvalue()).decode("utf-8"))
+    else:
+        img.thumbnail((1800, 1800))
+        b_single = io.BytesIO()
+        img.save(b_single, format="JPEG", quality=90)
+        images_b64.append(base64.b64encode(b_single.getvalue()).decode("utf-8"))
+
+    content = [{"type": "text", "text": prompt_text}]
+    for b64_item in images_b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_item}", "detail": "high"},
+        })
+    return content
 
 def compress_image_bytes(raw_bytes, max_side=768, quality=72):
     img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
@@ -556,62 +632,62 @@ def generate_and_send_image(user_id, prompt_text):
 def stats_command(message):
     if message.chat.id != ADMIN_ID:
         return
-    conn = sqlite3.connect(STATS_DB)
-    cur = conn.cursor()
-    today_prefix = datetime.now().strftime("%Y-%m-%d")
-    total_users = cur.execute("SELECT COUNT(DISTINCT user_id) FROM usage_logs").fetchone()[0]
-    total_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type != 'visit'").fetchone()[0]
-    today_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE created_at LIKE ? AND action_type != 'visit'", (f"{today_prefix}%",)).fetchone()[0]
-    total_tokens = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs").fetchone()[0]
-    by_type = cur.execute("SELECT action_type, COUNT(*) FROM usage_logs WHERE action_type != 'visit' GROUP BY action_type").fetchall()
-    top_users = cur.execute("""
-        SELECT user_id, MAX(username), MAX(first_name), COUNT(*), COALESCE(SUM(tokens_used), 0)
-        FROM usage_logs
-        GROUP BY user_id
-        ORDER BY MAX(id) DESC
-        LIMIT 10
-    """).fetchall()
-    conn.close()
+    try:
+        conn = sqlite3.connect(STATS_DB)
+        cur = conn.cursor()
+        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        total_users = cur.execute("SELECT COUNT(DISTINCT user_id) FROM usage_logs").fetchone()[0]
+        total_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type != 'visit'").fetchone()[0]
+        today_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE created_at LIKE ? AND action_type != 'visit'", (f"{today_prefix}%",)).fetchone()[0]
+        total_tokens = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs").fetchone()[0]
+        by_type = cur.execute("SELECT action_type, COUNT(*) FROM usage_logs WHERE action_type != 'visit' GROUP BY action_type").fetchall()
+        top_users = cur.execute("""
+            SELECT user_id, MAX(username), MAX(first_name), COUNT(*), COALESCE(SUM(tokens_used), 0)
+            FROM usage_logs
+            GROUP BY user_id
+            ORDER BY MAX(id) DESC
+            LIMIT 10
+        """).fetchall()
 
-    type_labels = {
-        "text": "💬 Текст",
-        "image_gen": "🎨 Генерация фото",
-        "image_edit": "🪄 Редактирование фото",
-        "image_vision": "👁 Анализ фото",
-    }
-    types_str = "\n".join([f"• {type_labels.get(k, k)}: *{v}*" for k, v in by_type]) or "• Пока нет запросов"
-    users_lines = []
-    for uid, uname, fname, cnt, toks in top_users:
-        tag = f"@{uname}" if uname else (fname or str(uid))
-        users_lines.append(f"• {tag} (`{uid}`): *{cnt}* действ., {toks} ток.")
-    users_str = "\n".join(users_lines) or "• Пока пусто"
+        row_bal = cur.execute("SELECT value FROM bot_settings WHERE key = 'base_caps'").fetchone()
+        row_ts = cur.execute("SELECT value FROM bot_settings WHERE key = 'base_caps_ts'").fetchone()
+        balance_line = "💰 Баланс BotHub: _задай через_ `/balance число`"
+        if row_bal and row_ts:
+            base_caps = float(row_bal[0])
+            base_ts = row_ts[0]
+            toks_since = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs WHERE created_at >= ?", (base_ts,)).fetchone()[0]
+            imgs_since = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type IN ('image_gen', 'image_edit') AND created_at >= ?", (base_ts,)).fetchone()[0]
+            est_spent = toks_since * 15 + imgs_since * 12000
+            est_left = max(0, int(base_caps - est_spent))
+            balance_line = f"💰 Ориентировочный остаток: *~{est_left:,} CAPS*".replace(",", " ")
+        conn.close()
 
-    conn2 = sqlite3.connect(STATS_DB)
-    c2 = conn2.cursor()
-    row_bal = c2.execute("SELECT value FROM bot_settings WHERE key = 'base_caps'").fetchone()
-    row_ts = c2.execute("SELECT value FROM bot_settings WHERE key = 'base_caps_ts'").fetchone()
-    balance_line = "💰 Баланс BotHub: _задай через_ `/balance число`"
-    if row_bal and row_ts:
-        base_caps = float(row_bal)
-        base_ts = row_ts
-        toks_since = c2.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs WHERE created_at >= ?", (base_ts,)).fetchone()
-        imgs_since = c2.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type IN ('image_gen', 'image_edit') AND created_at >= ?", (base_ts,)).fetchone()
-        # Оценочный расход: ~15 CAPS за 1 токен gpt-6-luna + ~12000 CAPS за 1 картинку seedream-5-0-flash
-        est_spent = toks_since * 15 + imgs_since * 12000
-        est_left = max(0, int(base_caps - est_spent))
-        balance_line = f"💰 Ориентировочный остаток: *~{est_left:,} CAPS*".replace(",", " ")
-    conn2.close()
+        type_labels = {
+            "text": "💬 Текст",
+            "image_gen": "🎨 Генерация фото",
+            "image_edit": "🪄 Редактирование фото",
+            "image_vision": "👁 Анализ фото",
+        }
+        types_str = chr(10).join([f"• {type_labels.get(k, k)}: *{v}*" for k, v in by_type]) or "• Пока нет запросов"
+        users_lines = []
+        for uid, uname, fname, cnt, toks in top_users:
+            tag = f"@{uname}" if uname else (fname or str(uid))
+            users_lines.append(f"• {tag} (`{uid}`): *{cnt}* действ., {toks} ток.")
+        users_str = chr(10).join(users_lines) or "• Пока пусто"
 
-    report = (
-        f"📊 *Статистика Yulia AI*\n\n"
-        f"{balance_line}\n"
-        f"👥 Уникальных пользователей: *{total_users}*\n"
-        f"⚡ Запросов сегодня / всего: *{today_reqs}* / *{total_reqs}*\n"
-        f"🧮 Текстовых токенов учтено: *{total_tokens}*\n\n"
-        f"*По типам задач:*\n{types_str}\n\n"
-        f"*Последние пользователи:*\n{users_str}"
-    )
-    send_pretty_message(message.chat.id, report)
+        report = (
+            f"📊 *Статистика Yulia AI*{chr(10)}{chr(10)}"
+            f"{balance_line}{chr(10)}"
+            f"👥 Уникальных пользователей: *{total_users}*{chr(10)}"
+            f"⚡ Запросов сегодня / всего: *{today_reqs}* / *{total_reqs}*{chr(10)}"
+            f"🧮 Текстовых токенов учтено: *{total_tokens}*{chr(10)}{chr(10)}"
+            f"*По типам задач:*{chr(10)}{types_str}{chr(10)}{chr(10)}"
+            f"*Последние пользователи:*{chr(10)}{users_str}"
+        )
+        send_pretty_message(message.chat.id, report)
+    except Exception as e:
+        logger.exception("Stats error: %s", e)
+        bot.send_message(message.chat.id, f"Ошибка статистики: {e}")
 
 
 @bot.message_handler(commands=["balance"])
@@ -635,90 +711,18 @@ def set_balance_command(message):
 @bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.chat.id
-    log_usage(user_id, "visit", 0, message.from_user.username, message.from_user.first_name)
-    show_welcome(message, is_new_user=user_id not in user_histories)
-
-
-@bot.message_handler(commands=["help"])
-def help_message(message):
-    user_id = message.chat.id
-    if user_id not in user_histories:
-        user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt()}
-        ]
-    send_pretty_message(
-        user_id,
-        "✨ *Чем могу помочь*\n"
-        "Умный диалог с памятью, генерация и редактирование фото, "
-        "анализ изображений и документов, голосовой ввод и озвучка ответов.\n\n"
-        "Просто напиши сообщение или отправь фото, голосовое либо документ.",
-        reply_markup=get_main_keyboard(),
-    )
-
-
-@bot.message_handler(commands=["clear"])
-def clear_memory(message):
-    user_id = message.chat.id
-    request_memory_clear(user_id)
-
-
-def clear_memory_confirmed(chat_id):
-    user_histories[chat_id] = [
-        {"role": "system", "content": get_system_prompt()}
-    ]
-    pending_memory_clear.discard(chat_id)
-    send_pretty_message(
-        chat_id,
-        "🧹 *История очищена.* Настройки сохранены — можем начать новый разговор.",
-        reply_markup=get_main_keyboard(),
-    )
-
-
-@bot.message_handler(commands=["voice"])
-def switch_voice(message):
-    user_id = message.chat.id
-    switch_voice_for_user(user_id)
-
-
-def switch_voice_for_user(user_id):
-    current = user_voices.get(user_id, "nova")
-    new_voice = "onyx" if current == "nova" else "nova"
-    user_voices[user_id] = new_voice
-    voice_name = "Мужской (Onyx)" if new_voice == "onyx" else "Женский (Nova)"
-    send_pretty_message(
-        user_id,
-        f"🎙 *Голос ответа изменён:* {voice_name}",
-        reply_markup=get_main_keyboard(),
-    )
-
-
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
-    user_id = message.chat.id
-    text = message.text
-
-    if text == "🎙 Сменить голос":
-        switch_voice(message)
-        return
-
-    section = LEGACY_MENU_LABELS.get(text, text)
-    if section in MAIN_MENU_LABELS:
-        if section == "✨ Помощник" and text == "✨ Что ты умеешь?":
-            show_welcome(message)
-        else:
-            show_section(user_id, section)
-        return
-
-    if text == "🧹 Очистить память":
-        clear_memory(message)
-        return
-
     log_usage(user_id, "visit", 0, getattr(message.from_user, "username", None), getattr(message.from_user, "first_name", None))
     try:
         with keep_typing(user_id, "typing"):
             answer = ask_claude(user_id, text)
         if answer:
             send_pretty_message(user_id, answer)
+    except Exception as e:
+        logger.exception("Text handling error for %s: %s", user_id, e)
+        try:
+            send_pretty_message(user_id, "⚠️ Связь на секунду прервалась. Попробуй отправить сообщение ещё раз!")
+        except Exception:
+            pass
     except Exception as e:
         logger.exception("Text message handling failed for user %s: %s", user_id, e)
         try:
@@ -734,7 +738,7 @@ def handle_voice(message):
     send_pretty_message(user_id, "🎙 *Распознаю голосовое сообщение…*")
 
     file_info = bot.get_file(message.voice.file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
+    downloaded_file = download_telegram_file(file_info.file_path)
 
     voice_filename = f"voice_{user_id}.ogg"
     with open(voice_filename, "wb") as new_file:
@@ -788,7 +792,7 @@ def handle_photo(message):
             send_pretty_message(user_id, "🪄 *Обрабатываю фотографию…*")
 
             # get_file and the timed download both use the configured Workers proxy.
-            file_info = bot.get_file(message.photo[0].file_id)
+            file_info = bot.get_file(message.photo[-1].file_id)
             downloaded_file = download_telegram_file(file_info.file_path)
             if not downloaded_file:
                 raise ValueError("Telegram returned an empty photo file")
@@ -851,16 +855,14 @@ def handle_photo(message):
         bot.send_chat_action(user_id, "typing")
         send_pretty_message(user_id, "🎨 *Обрабатываю фотографию…*")
 
-        file_info = bot.get_file(message.photo[0].file_id)
+        file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = download_telegram_file(file_info.file_path)
         if not downloaded_file:
             raise ValueError("Telegram returned an empty photo file")
-        base64_image = base64.b64encode(downloaded_file).decode("utf-8")
-
         analysis_prompt = (
             user_caption
             if user_caption
-            else "Подробно и красиво опиши, что изображено на этой картинке."
+            else "СТРОГО: читай ТОЛЬКО то, что реально видно на фрагментах картинки, ничего не придумывай. Сначала дословно выпиши условие каждой задачи с фото, затем реши. Если на нём есть учебные задачи, тест, формулы, код или текст задания — полностью расшифруй условие каждой задачи и дай подробное пошаговое решение с ответом. Если это обычное фото или схема — подробно опиши и объясни её."
         )
 
         if user_id not in user_histories:
@@ -868,18 +870,14 @@ def handle_photo(message):
                 {"role": "system", "content": get_system_prompt()}
             ]
 
-        image_message = [
-            {"type": "text", "text": analysis_prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-            },
-        ]
+        image_message = build_vision_content(downloaded_file, analysis_prompt)
 
         response = client.chat.completions.create(
-            model="gpt-6-luna",
-            messages=user_histories[user_id]
-            + [{"role": "user", "content": image_message}],
+            model=("gemini-2.5-pro" if "олимпиад" in analysis_prompt.lower() else "gemini-2.5-flash"),
+            messages=[
+                {"role": "system", "content": get_system_prompt()},
+                {"role": "user", "content": image_message},
+            ],
         )
 
         used_vis = getattr(getattr(response, "usage", None), "total_tokens", 0)
@@ -912,10 +910,36 @@ def handle_document(message):
         1
     ].lower()  # Узнаём расширение файла (.pdf, .docx, .txt)
 
+    if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        try:
+            with keep_typing(user_id, "typing"):
+                send_pretty_message(user_id, f"🖼 *Изучаю изображение «{file_name}»…*")
+                file_info = bot.get_file(doc.file_id)
+                raw_bytes = download_telegram_file(file_info.file_path)
+                # Оптимизируем разрешение до 1600px (текст и формулы идеально читаются)
+                caption_q = (message.caption or "").strip() or "Внимательно прочитай текст и формулы на изображении и подробно выполни все задания или ответь на вопрос."
+                if user_id not in user_histories:
+                    user_histories[user_id] = [{"role": "system", "content": get_system_prompt()}]
+                img_msg = build_vision_content(raw_bytes, caption_q)
+                resp = client.chat.completions.create(
+                    model=("gemini-2.5-pro" if "олимпиад" in caption_q.lower() else "gemini-2.5-flash"),
+                    messages=[{"role": "system", "content": get_system_prompt()}, {"role": "user", "content": img_msg}],
+                )
+                used_v = getattr(getattr(resp, "usage", None), "total_tokens", 0)
+                log_usage(user_id, "image_vision", used_v, getattr(message.from_user, "username", None), getattr(message.from_user, "first_name", None))
+                ans = resp.choices.message.content
+                user_histories[user_id].append({"role": "user", "content": f"[Файл-изображение {file_name}: {caption_q}]"})
+                user_histories[user_id].append({"role": "assistant", "content": ans})
+                send_pretty_message(user_id, ans)
+        except Exception as e:
+            logger.exception("Image document failed for user %s: %s", user_id, e)
+            send_pretty_message(user_id, "⚠️ Не удалось прочитать изображение из файла. Попробуй отправить его ещё раз.")
+        return
+
     if ext not in [".pdf", ".docx", ".txt"]:
         send_pretty_message(
             user_id,
-            "Пока я читаю документы PDF, DOCX и TXT. "
+            "Пока я читаю документы PDF, DOCX, TXT и изображения (PNG, JPG, WEBP). "
             "Пришли файл в одном из этих форматов.",
         )
         return
@@ -926,7 +950,7 @@ def handle_document(message):
     try:
         # 1. Скачиваем файл из Telegram
         file_info = bot.get_file(doc.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        downloaded_file = download_telegram_file(file_info.file_path)
         temp_path = f"temp_{user_id}_{file_name}"
 
         with open(temp_path, "wb") as f:
@@ -980,7 +1004,7 @@ def handle_document(message):
         print(f"Document processing failed for user {user_id}: {e}")
         send_pretty_message(
             user_id,
-            "Не получилось прочитать документ. Проверь файл и попробуй отправить его ещё раз.",
+            "Не удалось извлечь текст из этого файла (возможно, внутри только картинки или скан). Попробуй сделать скриншот страницы и отправить его как фото!",
         )
 
 
