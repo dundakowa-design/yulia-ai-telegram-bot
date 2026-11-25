@@ -1,5 +1,6 @@
 import os
 import base64
+import logging
 from pypdf import PdfReader
 import docx
 import urllib.request
@@ -9,8 +10,19 @@ from telebot import apihelper, types  # Добавили types для созда
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# Workers can terminate long-held requests, so keep polling requests shorter
+# than the proxy limit while allowing enough time for Telegram's long poll.
 apihelper.API_URL = "https://tg-proxy.dundakowa.workers.dev/bot{0}/{1}"
+# TeleBot formats file downloads through FILE_URL using the same bot token and
+# file_path returned by get_file (e.g. /file/bot<TOKEN>/<file_path>).
 apihelper.FILE_URL = "https://tg-proxy.dundakowa.workers.dev/file/bot{0}/{1}"
+apihelper.CONNECT_TIMEOUT = 10
+apihelper.READ_TIMEOUT = 35
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+logger = logging.getLogger("tg_bot")
 
 load_dotenv()
 
@@ -243,6 +255,19 @@ def send_pretty_message(chat_id, text, reply_markup=None):
         bot.send_message(chat_id, text, reply_markup=reply_markup)
 
 
+def download_telegram_file(file_path):
+    """Download a Telegram file via the configured proxy with bounded timeouts."""
+    file_url = apihelper.FILE_URL.format(bot.token, file_path)
+    response = apihelper.requests.get(
+        file_url,
+        timeout=(apihelper.CONNECT_TIMEOUT, apihelper.READ_TIMEOUT),
+        proxies=apihelper.proxy,
+    )
+    if response.status_code != 200:
+        raise apihelper.ApiHTTPException("Download file", response)
+    return response.content
+
+
 # Новое: функция генерации и отправки картинки
 def generate_and_send_image(user_id, prompt_text):
     bot.send_chat_action(user_id, "upload_photo")
@@ -445,21 +470,25 @@ def handle_voice(message):
 def handle_photo(message):
     user_id = message.chat.id
     user_caption = message.caption if message.caption else ""
+    if not message.photo:
+        send_pretty_message(user_id, "Не удалось получить фотографию. Попробуй отправить её ещё раз.")
+        return
+
+    input_filename = f"edit_in_{user_id}.jpg"
+    output_filename = f"edit_out_{user_id}.png"
 
     # Проверяем, просит ли пользователь отредактировать картинку по ключевым словам
     edit_triggers = ("измени", "замени", "убери", "удали", "отредактируй", "сделай фон")
     if user_caption.lower().strip().startswith(edit_triggers):
-        bot.send_chat_action(user_id, "upload_photo")
-        send_pretty_message(
-            user_id, "🪄 *Обрабатываю фотографию…*"
-        )
-
         try:
-            # 1. Скачиваем исходное фото на диск во временный файл
+            bot.send_chat_action(user_id, "upload_photo")
+            send_pretty_message(user_id, "🪄 *Обрабатываю фотографию…*")
+
+            # get_file and the timed download both use the configured Workers proxy.
             file_info = bot.get_file(message.photo[-1].file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            input_filename = f"edit_in_{user_id}.png"
-            output_filename = f"edit_out_{user_id}.png"
+            downloaded_file = download_telegram_file(file_info.file_path)
+            if not downloaded_file:
+                raise ValueError("Telegram returned an empty photo file")
 
             with open(input_filename, "wb") as f:
                 f.write(downloaded_file)
@@ -481,6 +510,8 @@ def handle_photo(message):
             elif getattr(image_data, "b64_json", None):
                 with open(output_filename, "wb") as f:
                     f.write(base64.b64decode(image_data.b64_json))
+            else:
+                raise ValueError("Image API returned neither URL nor image data")
 
             with open(output_filename, "rb") as out_photo:
                 bot.send_photo(
@@ -490,59 +521,77 @@ def handle_photo(message):
                     parse_mode="Markdown",
                 )
 
-            # Удаляем оба временных файла
-            os.remove(input_filename)
-            os.remove(output_filename)
-
         except Exception as e:
-            if os.path.exists(f"edit_in_{user_id}.png"):
-                os.remove(f"edit_in_{user_id}.png")
-            print(f"Photo editing failed for user {user_id}: {e}")
-            send_pretty_message(
-                user_id,
-                "Не получилось обработать фотографию. Проверь подпись к фото "
-                "и попробуй ещё раз.",
-            )
+            logger.exception("Photo editing failed for user %s: %s", user_id, e)
+            try:
+                send_pretty_message(
+                    user_id,
+                    "Не получилось обработать фотографию. Проверь подпись к фото "
+                    "и попробуй ещё раз.",
+                )
+            except Exception:
+                logger.exception("Could not notify user %s about photo failure", user_id)
+        finally:
+            for filename in (input_filename, output_filename):
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except OSError:
+                    logger.exception("Could not remove temporary file %s", filename)
         return
 
     # Обычный режим: если триггерных слов нет — просто анализируем картинку
-    bot.send_chat_action(user_id, "typing")
-    send_pretty_message(user_id, "🎨 *Обрабатываю фотографию…*")
-    file_info = bot.get_file(message.photo[-1].file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    base64_image = base64.b64encode(downloaded_file).decode("utf-8")
+    try:
+        bot.send_chat_action(user_id, "typing")
+        send_pretty_message(user_id, "🎨 *Обрабатываю фотографию…*")
 
-    analysis_prompt = (
-        user_caption
-        if user_caption
-        else "Подробно и красиво опиши, что изображено на этой картинке."
-    )
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = download_telegram_file(file_info.file_path)
+        if not downloaded_file:
+            raise ValueError("Telegram returned an empty photo file")
+        base64_image = base64.b64encode(downloaded_file).decode("utf-8")
 
-    if user_id not in user_histories:
-        user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt(user_id)}
+        analysis_prompt = (
+            user_caption
+            if user_caption
+            else "Подробно и красиво опиши, что изображено на этой картинке."
+        )
+
+        if user_id not in user_histories:
+            user_histories[user_id] = [
+                {"role": "system", "content": get_system_prompt(user_id)}
+            ]
+
+        image_message = [
+            {"type": "text", "text": analysis_prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+            },
         ]
 
-    image_message = [
-        {"type": "text", "text": analysis_prompt},
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-        },
-    ]
+        response = client.chat.completions.create(
+            model="gpt-6-luna",
+            messages=user_histories[user_id]
+            + [{"role": "user", "content": image_message}],
+        )
 
-    response = client.chat.completions.create(
-        model="gpt-6-luna",
-        messages=user_histories[user_id] + [{"role": "user", "content": image_message}],
-    )
-
-    answer = response.choices[0].message.content
-    user_histories[user_id].append(
-        {"role": "user", "content": f"[Пользователь отправил фото: {analysis_prompt}]"}
-    )
-    user_histories[user_id].append({"role": "assistant", "content": answer})
-
-    send_pretty_message(user_id, answer)
+        answer = response.choices[0].message.content
+        user_histories[user_id].append(
+            {"role": "user", "content": f"[Пользователь отправил фото: {analysis_prompt}]"}
+        )
+        user_histories[user_id].append({"role": "assistant", "content": answer})
+        send_pretty_message(user_id, answer)
+    except Exception as e:
+        logger.exception("Photo analysis failed for user %s: %s", user_id, e)
+        try:
+            send_pretty_message(
+                user_id,
+                "Не получилось получить или обработать фотографию. "
+                "Проверь соединение и попробуй отправить её ещё раз.",
+            )
+        except Exception:
+            logger.exception("Could not notify user %s about photo failure", user_id)
 
 
 # Новое: обработка PDF, Word (.docx) и текстовых (.txt) документов
@@ -684,4 +733,4 @@ def callback_settings(call):
 
 
 print("Мультимодальный бот с генерацией картинок запущен!")
-bot.infinity_polling(timeout=60, long_polling_timeout=60)
+bot.infinity_polling(timeout=10, long_polling_timeout=20)
