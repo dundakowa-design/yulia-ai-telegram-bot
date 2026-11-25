@@ -17,7 +17,7 @@ apihelper.API_URL = "https://tg-proxy.dundakowa.workers.dev/bot{0}/{1}"
 # file_path returned by get_file (e.g. /file/bot<TOKEN>/<file_path>).
 apihelper.FILE_URL = "https://tg-proxy.dundakowa.workers.dev/file/bot{0}/{1}"
 apihelper.CONNECT_TIMEOUT = 10
-apihelper.READ_TIMEOUT = 35
+apihelper.READ_TIMEOUT = 60
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -251,7 +251,9 @@ def send_pretty_message(chat_id, text, reply_markup=None):
         bot.send_message(
             chat_id, text, parse_mode="Markdown", reply_markup=reply_markup
         )
-    except Exception:
+    except apihelper.ApiTelegramException as error:
+        if "can't parse entities" not in error.description.lower():
+            raise
         bot.send_message(chat_id, text, reply_markup=reply_markup)
 
 
