@@ -28,44 +28,14 @@ load_dotenv()
 
 bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = OpenAI(
-    api_key=os.getenv("BOTHUB_API_KEY"), base_url="https://openai.bothub.chat/v1"
+    api_key=os.getenv("BOTHUB_API_KEY"),
+    base_url="https://openai.bothub.chat/v1",
+    timeout=90.0,
 )
 
 user_histories = {}
 user_voices = {}  # Храним выбранный голос для каждого пользователя
-user_roles = {}  # Храним выбранную роль для каждого пользователя
 
-ROLES = {
-    "default": {
-        "name": "🤖 Обычный помощник",
-        "prompt": "Ты стильный, дружелюбный и умный мультимодальный ИИ-ассистент. Отвечай понятно, по делу и помогай во всех вопросах.",
-    },
-    "it": {
-        "name": "💻 Программирование и IT",
-        "prompt": "Ты опытный Python-разработчик и наставник по AI-инженерии. Объясняй код простыми словами сверху вниз, помогай находить ошибки и пиши чистые примеры.",
-    },
-    "study": {
-        "name": "📚 Учёба и наука",
-        "prompt": "Ты терпеливый репетитор и методист. Объясняй сложные темы на простых жизненных примерах, делай понятные конспекты и проверяй знания.",
-    },
-    "text": {
-        "name": "✍️ Тексты и документы",
-        "prompt": "Ты профессиональный редактор и аналитик. Пиши живые, грамотные тексты, структурируй документы и делай чёткие выжимки без воды.",
-    },
-    "creative": {
-        "name": "🎨 Творчество и хобби",
-        "prompt": "Ты креативный соавтор. Помогай придумывать сценарии, стихи, идеи для хобби, игр, подарков и творческих проектов.",
-    },
-    "lifestyle": {
-        "name": "🌿 Кулинария и лайфстайл",
-        "prompt": "Ты дружелюбный помощник по образу жизни и кулинарии. Подсказывай вкусные рецепты (в том числе для аэрогриля), идеи для уюта дома и полезные привычки.",
-    },
-}
-
-user_documents = {}  # Здесь будем хранить текст последнего загруженного документа
-waiting_for_image_prompt = (
-    set()
-)  # Запоминаем пользователей, которые нажали кнопку рисования
 pending_memory_clear = set()  # Подтверждение очистки памяти
 
 MAIN_MENU_LABELS = {
@@ -73,16 +43,41 @@ MAIN_MENU_LABELS = {
     "🎨 Фото и дизайн",
     "🎙 Голос",
     "📄 Документы",
-    "🎭 Режим",
     "⚙️ Настройки",
 }
 
 LEGACY_MENU_LABELS = {
     "✨ Что ты умеешь?": "✨ Помощник",
-    "🎨 Нарисовать картинку": "🎨 Фото и дизайн",
     "🎙 Сменить голос": "🎙 Голос",
-    "🎭 Сменить роль": "🎭 Режим",
 }
+
+IMAGE_GENERATION_TRIGGERS = (
+    "сгенерируй изображение",
+    "сгенерируй картинку",
+    "сгенерируй рисунок",
+    "сгенерируй фото",
+    "создай изображение",
+    "создай картинку",
+    "создай рисунок",
+    "сделай изображение",
+    "сделай картинку",
+    "нарисуй",
+)
+
+
+def extract_image_prompt(text):
+    """Return an image prompt for a recognized command, or None otherwise."""
+    normalized_text = text.strip()
+    folded_text = normalized_text.casefold()
+
+    for trigger in IMAGE_GENERATION_TRIGGERS:
+        if folded_text.startswith(trigger) and (
+            len(folded_text) == len(trigger)
+            or not folded_text[len(trigger)].isalnum()
+        ):
+            return normalized_text[len(trigger) :].lstrip(" \t:,-—.!?\n")
+
+    return None
 
 
 def get_main_keyboard():
@@ -95,20 +90,7 @@ def get_main_keyboard():
         types.KeyboardButton("🎙 Голос"),
         types.KeyboardButton("📄 Документы"),
     )
-    keyboard.row(
-        types.KeyboardButton("🎭 Режим"),
-        types.KeyboardButton("⚙️ Настройки"),
-    )
-    return keyboard
-
-
-def get_roles_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        types.InlineKeyboardButton(text=info["name"], callback_data=f"role_{key}")
-        for key, info in ROLES.items()
-    ]
-    keyboard.add(*buttons)
+    keyboard.row(types.KeyboardButton("⚙️ Настройки"))
     return keyboard
 
 
@@ -150,15 +132,7 @@ def show_section(chat_id, section):
             "Если у тебя есть конкретный вопрос или пожелание, добавь его к файлу.",
             reply_markup=get_main_keyboard(),
         )
-    elif section == "🎭 Режим":
-        current_role = ROLES[user_roles.get(chat_id, "default")]["name"]
-        send_pretty_message(
-            chat_id,
-            f"🎭 *Текущий режим:* {current_role}\n\nВыбери подходящий режим:",
-            reply_markup=get_roles_keyboard(),
-        )
     elif section == "⚙️ Настройки":
-        role_name = ROLES[user_roles.get(chat_id, "default")]["name"]
         voice = user_voices.get(chat_id, "nova")
         voice_name = "Мужской (Onyx)" if voice == "onyx" else "Женский (Nova)"
         keyboard = types.InlineKeyboardMarkup(row_width=1)
@@ -173,9 +147,8 @@ def show_section(chat_id, section):
         send_pretty_message(
             chat_id,
             "⚙️ *Настройки*\n"
-            f"Режим: {role_name}\n"
             f"Голос ответа: {voice_name}\n\n"
-            "Здесь можно сменить голос или начать новый разговор.",
+            "Здесь можно сменить голос или очистить историю разговора.",
             reply_markup=keyboard,
         )
 
@@ -184,20 +157,21 @@ def show_welcome(message, is_new_user=False):
     user_id = message.chat.id
     if user_id not in user_histories:
         user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt(user_id)}
+            {"role": "system", "content": get_system_prompt()}
         ]
 
     if is_new_user:
         welcome_text = (
-            "✨ *Добро пожаловать в Yulia AI*\n\n"
-            "Я — твой внимательный помощник для вопросов, идей и повседневных задач.\n\n"
-            "Напиши сообщение, отправь голосовое, фото или документ — "
-            "а нужный раздел выбери в меню ниже."
+            "✨ *Привет! Я Yulia AI*\n\n"
+            "Помогу с вопросами и идеями, создам или отредактирую фото, "
+            "проанализирую изображение или документ, распознаю голосовое "
+            "и озвучу ответ. Просто напиши или отправь файл."
         )
     else:
         welcome_text = (
             "✨ *Рада тебя видеть!*\n"
-            "Продолжим разговор или откроем нужный раздел?"
+            "Продолжим разговор? Напиши сообщение или отправь фото, документ "
+            "или голосовое."
         )
 
     send_pretty_message(user_id, welcome_text, reply_markup=get_main_keyboard())
@@ -215,24 +189,23 @@ def request_memory_clear(chat_id):
     send_pretty_message(
         chat_id,
         "🧹 *Очистить историю разговора?*\n"
-        "Это удалит текущий контекст переписки. Настройки роли и голоса сохранятся.",
+        "Это удалит текущий контекст переписки. Настройки голоса сохранятся.",
         reply_markup=keyboard,
     )
 
 
-def get_system_prompt(user_id):
+def get_system_prompt():
     today = datetime.now().strftime("%d.%m.%Y, время %H:%M")
-    role_key = user_roles.get(user_id, "default")
-    role_instruction = ROLES[role_key]["prompt"]
-    return f"""{role_instruction}
+    return f"""Ты — Yulia AI, персональный мультимодальный ИИ-ассистент в Telegram. Всегда представляйся только как Yulia AI; никогда не называй себя ChatGPT или OpenAI.
+Автоматически определяй задачу пользователя: написание или отладка кода, работа с текстом, аналитика, обучение, творчество или бытовой вопрос. Самостоятельно выбирай наиболее подходящий стиль и глубину ответа — переключать режимы не нужно. Для кода давай точные, работающие решения; для обучения объясняй понятно; для аналитики структурируй выводы; для текстов учитывай цель и аудиторию; для творчества предлагай оригинальные идеи; на бытовые вопросы отвечай практично и дружелюбно. Учитывай контекст переписки и содержимое присланных изображений и документов.
 Сегодняшняя дата и время: {today}.
-Оформляй ответы красиво: используй *одинарные звёздочки* для жирного шрифта, списки и эмодзи. Никогда не используй решётки ## или ### для заголовков."""
+Оформляй ответы понятно: используй *одинарные звёздочки* для жирного шрифта, списки и эмодзи, когда это уместно. Не используй решётки ## или ### для заголовков."""
 
 
 def ask_claude(user_id, user_text):
     if user_id not in user_histories:
         user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt(user_id)}
+            {"role": "system", "content": get_system_prompt()}
         ]
 
     user_histories[user_id].append({"role": "user", "content": user_text})
@@ -314,24 +287,22 @@ def generate_and_send_image(user_id, prompt_text):
 @bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.chat.id
-    waiting_for_image_prompt.discard(user_id)
     show_welcome(message, is_new_user=user_id not in user_histories)
 
 
 @bot.message_handler(commands=["help"])
 def help_message(message):
     user_id = message.chat.id
-    waiting_for_image_prompt.discard(user_id)
     if user_id not in user_histories:
         user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt(user_id)}
+            {"role": "system", "content": get_system_prompt()}
         ]
     send_pretty_message(
         user_id,
         "✨ *Чем могу помочь*\n"
-        "Задавай вопросы, отправляй голосовые сообщения и фото, "
-        "создавай или редактируй изображения, присылай PDF, DOCX и TXT.\n\n"
-        "Выбери раздел в меню или просто продолжи переписку.",
+        "Умный диалог с памятью, генерация и редактирование фото, "
+        "анализ изображений и документов, голосовой ввод и озвучка ответов.\n\n"
+        "Просто напиши сообщение или отправь фото, голосовое либо документ.",
         reply_markup=get_main_keyboard(),
     )
 
@@ -344,7 +315,7 @@ def clear_memory(message):
 
 def clear_memory_confirmed(chat_id):
     user_histories[chat_id] = [
-        {"role": "system", "content": get_system_prompt(chat_id)}
+        {"role": "system", "content": get_system_prompt()}
     ]
     pending_memory_clear.discard(chat_id)
     send_pretty_message(
@@ -377,23 +348,12 @@ def handle_text(message):
     user_id = message.chat.id
     text = message.text
 
-    # Совместимость со старыми подписями клавиатуры.
-    if text == "🎨 Нарисовать картинку":
-        waiting_for_image_prompt.add(user_id)
-        send_pretty_message(
-            user_id,
-            "🎨 *Опиши изображение, которое хочешь создать.*\n"
-            "Например: уютная оранжерея в мягком утреннем свете.",
-        )
-        return
-    elif text == "🎙 Сменить голос":
-        waiting_for_image_prompt.discard(user_id)
+    if text == "🎙 Сменить голос":
         switch_voice(message)
         return
 
     section = LEGACY_MENU_LABELS.get(text, text)
     if section in MAIN_MENU_LABELS:
-        waiting_for_image_prompt.discard(user_id)
         if section == "✨ Помощник" and text == "✨ Что ты умеешь?":
             show_welcome(message)
         else:
@@ -401,18 +361,18 @@ def handle_text(message):
         return
 
     if text == "🧹 Очистить память":
-        waiting_for_image_prompt.discard(user_id)
         clear_memory(message)
         return
-    # Если пользователь до этого нажал кнопку «Нарисовать картинку»
-    if user_id in waiting_for_image_prompt:
-        waiting_for_image_prompt.remove(user_id)
-        generate_and_send_image(user_id, text)
-        return
 
-    # Если пользователь просто начал фразу со слова «нарисуй»
-    if text.lower().startswith("нарисуй "):
-        prompt_text = text[8:].strip()  # Отрезаем слово «нарисуй »
+    prompt_text = extract_image_prompt(text)
+    if prompt_text is not None:
+        if not prompt_text:
+            send_pretty_message(
+                user_id,
+                "🎨 Опиши изображение, которое хочешь создать — например, "
+                "«Нарисуй уютную оранжерею в мягком утреннем свете».",
+            )
+            return
         generate_and_send_image(user_id, prompt_text)
         return
 
@@ -444,9 +404,12 @@ def handle_voice(message):
     send_pretty_message(user_id, f"🎤 *Ты сказала:* _{recognized_text}_")
     os.remove(voice_filename)
 
-    # Если голосом попросили нарисовать картинку!
-    if recognized_text.lower().startswith("нарисуй "):
-        generate_and_send_image(user_id, recognized_text[8:].strip())
+    prompt_text = extract_image_prompt(recognized_text)
+    if prompt_text is not None:
+        if not prompt_text:
+            send_pretty_message(user_id, "Опиши, какое изображение нужно создать.")
+            return
+        generate_and_send_image(user_id, prompt_text)
         return
 
     send_pretty_message(user_id, "Формирую ответ…")
@@ -561,7 +524,7 @@ def handle_photo(message):
 
         if user_id not in user_histories:
             user_histories[user_id] = [
-                {"role": "system", "content": get_system_prompt(user_id)}
+                {"role": "system", "content": get_system_prompt()}
             ]
 
         image_message = [
@@ -656,7 +619,7 @@ def handle_document(message):
         # 3. Сохраняем содержимое файла в память диалога пользователя
         if user_id not in user_histories:
             user_histories[user_id] = [
-                {"role": "system", "content": get_system_prompt(user_id)}
+                {"role": "system", "content": get_system_prompt()}
             ]
 
         user_prompt = (
@@ -676,31 +639,6 @@ def handle_document(message):
             user_id,
             "Не получилось прочитать документ. Проверь файл и попробуй отправить его ещё раз.",
         )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("role_"))
-def callback_role(call):
-    user_id = call.message.chat.id
-    waiting_for_image_prompt.discard(user_id)
-    role_key = call.data.replace("role_", "")
-    user_roles[user_id] = role_key
-    if user_id not in user_histories:
-        user_histories[user_id] = [
-            {"role": "system", "content": get_system_prompt(user_id)}
-        ]
-    else:
-        user_histories[user_id][0] = {
-            "role": "system",
-            "content": get_system_prompt(user_id),
-        }
-
-    role_name = ROLES[role_key]["name"]
-    bot.answer_callback_query(call.id, f"Выбрана роль: {role_name}")
-    send_pretty_message(
-        user_id,
-        f"✅ *Режим изменён:* {role_name}\nКонтекст разговора сохранён.",
-        reply_markup=get_main_keyboard(),
-    )
 
 
 @bot.callback_query_handler(
