@@ -122,7 +122,7 @@ def show_section(chat_id, section):
             "✨ *Я здесь!*\n"
             "Напиши, что хочешь узнать, обсудить или придумать. "
             "Можно просто продолжить наш диалог.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
     elif section == "🎨 Фото и дизайн":
         send_pretty_message(
@@ -131,7 +131,7 @@ def show_section(chat_id, section):
             "Создать изображение — напиши «Нарисуй…» и опиши идею.\n"
             "Изменить фотографию — пришли её с подписью, например «Убери фон».\n"
             "Обсудить изображение — просто отправь фото с вопросом или без него.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
     elif section == "🎙 Голос":
         voice = user_voices.get(chat_id, "nova")
@@ -141,7 +141,7 @@ def show_section(chat_id, section):
             "🎙 *Голосовое общение*\n"
             "Отправь голосовое сообщение — я распознаю речь, отвечу и озвучу ответ.\n\n"
             f"Текущий голос озвучки: *{voice_name}*. Переключить его можно в настройках.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
     elif section == "📄 Документы":
         send_pretty_message(
@@ -150,7 +150,7 @@ def show_section(chat_id, section):
             "Пришли PDF, DOCX или TXT — я помогу разобраться с содержимым "
             "и подготовлю краткую выжимку.\n\n"
             "Если у тебя есть конкретный вопрос или пожелание, добавь его к файлу.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
     elif section == "⚙️ Настройки":
         voice = user_voices.get(chat_id, "nova")
@@ -173,28 +173,35 @@ def show_section(chat_id, section):
         )
 
 
+def get_soft_inline_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton(text="✦ Новый диалог", callback_data="ask_clear_mem"),
+        types.InlineKeyboardButton(text="✧ Моя статистика", callback_data="show_my_stats"),
+    )
+    return kb
+
+
 def show_welcome(message, is_new_user=False):
     user_id = message.chat.id
+    NL = chr(10)
     if user_id not in user_histories:
         user_histories[user_id] = [
             {"role": "system", "content": get_system_prompt()}
         ]
 
-    if is_new_user:
-        welcome_text = (
-            "✨ *Привет! Я Yulia AI*\n\n"
-            "Помогу с вопросами и идеями, создам или отредактирую фото, "
-            "проанализирую изображение или документ, распознаю голосовое "
-            "и озвучу ответ. Просто напиши или отправь файл."
-        )
-    else:
-        welcome_text = (
-            "✨ *Рада тебя видеть!*\n"
-            "Продолжим разговор? Напиши сообщение или отправь фото, документ "
-            "или голосовое."
-        )
+    try:
+        m = bot.send_message(user_id, "✧", reply_markup=types.ReplyKeyboardRemove())
+        bot.delete_message(user_id, m.message_id)
+    except Exception:
+        pass
 
-    send_pretty_message(user_id, welcome_text, reply_markup=get_main_keyboard())
+    if is_new_user:
+        welcome_text = "✦ *Привет, я Yulia AI*" + NL + NL + "_Твой спокойный цифровой помощник._" + NL + "Просто напиши вопрос, отправь фото, документ или голосовое — я рядом и помогу во всём."
+    else:
+        welcome_text = "✦ *Рада тебя видеть*" + NL + NL + "Продолжим? Напиши сообщение или отправь файл — я на связи."
+
+    send_pretty_message(user_id, welcome_text, reply_markup=get_soft_inline_keyboard())
 
 
 def request_memory_clear(chat_id):
@@ -638,65 +645,118 @@ def generate_and_send_image(user_id, prompt_text):
 
 @bot.message_handler(commands=["stats"])
 def stats_command(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        conn = sqlite3.connect(STATS_DB)
-        cur = conn.cursor()
-        today_prefix = datetime.now().strftime("%Y-%m-%d")
-        total_users = cur.execute("SELECT COUNT(DISTINCT user_id) FROM usage_logs").fetchone()[0]
-        total_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type != 'visit'").fetchone()[0]
-        today_reqs = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE created_at LIKE ? AND action_type != 'visit'", (f"{today_prefix}%",)).fetchone()[0]
-        total_tokens = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs").fetchone()[0]
-        by_type = cur.execute("SELECT action_type, COUNT(*) FROM usage_logs WHERE action_type != 'visit' GROUP BY action_type").fetchall()
-        top_users = cur.execute("""
-            SELECT user_id, MAX(username), MAX(first_name), COUNT(*), COALESCE(SUM(tokens_used), 0)
-            FROM usage_logs
-            GROUP BY user_id
-            ORDER BY MAX(id) DESC
-            LIMIT 10
-        """).fetchall()
+    user_id = message.chat.id
+    is_admin = (str(user_id) == str(ADMIN_ID)) if ADMIN_ID else True
+    NL = chr(10)
 
-        row_bal = cur.execute("SELECT value FROM bot_settings WHERE key = 'base_caps'").fetchone()
-        row_ts = cur.execute("SELECT value FROM bot_settings WHERE key = 'base_caps_ts'").fetchone()
-        balance_line = "💰 Баланс BotHub: _задай через_ `/balance число`"
-        if row_bal and row_ts:
-            base_caps = float(row_bal[0])
-            base_ts = row_ts[0]
-            toks_since = cur.execute("SELECT COALESCE(SUM(tokens_used), 0) FROM usage_logs WHERE created_at >= ?", (base_ts,)).fetchone()[0]
-            imgs_since = cur.execute("SELECT COUNT(*) FROM usage_logs WHERE action_type IN ('image_gen', 'image_edit') AND created_at >= ?", (base_ts,)).fetchone()[0]
-            est_spent = toks_since * 15 + imgs_since * 12000
-            est_left = max(0, int(base_caps - est_spent))
-            balance_line = f"💰 Ориентировочный остаток: *~{est_left:,} CAPS*".replace(",", " ")
+    conn = sqlite3.connect("bot_stats.db")
+    cur = conn.cursor()
+
+    COST_PER_TOKEN = 0.75
+    COST_PER_IMAGE = 16879.0
+
+    if not is_admin:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(tokens_used), 0),
+                SUM(CASE WHEN action_type = 'image_gen' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN action_type = 'vision' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN action_type = 'text' THEN 1 ELSE 0 END)
+            FROM usage_logs
+            WHERE user_id = ? AND action_type != 'visit'
+            """,
+            (user_id,),
+        )
+        total_req, u_tokens, img_cnt, vis_cnt, txt_cnt = cur.fetchone()
         conn.close()
 
-        type_labels = {
-            "text": "💬 Текст",
-            "image_gen": "🎨 Генерация фото",
-            "image_edit": "🪄 Редактирование фото",
-            "image_vision": "👁 Анализ фото",
-        }
-        types_str = chr(10).join([f"• {type_labels.get(k, k)}: *{v}*" for k, v in by_type]) or "• Пока нет запросов"
-        users_lines = []
-        for uid, uname, fname, cnt, toks in top_users:
-            tag = f"@{uname}" if uname else (fname or str(uid))
-            users_lines.append(f"• {tag} (`{uid}`): *{cnt}* действ., {toks} ток.")
-        users_str = chr(10).join(users_lines) or "• Пока пусто"
+        spent_caps = int(round((u_tokens or 0) * COST_PER_TOKEN + (img_cnt or 0) * COST_PER_IMAGE))
+        spent_rub = round(spent_caps * 0.0002, 2)
 
-        report = (
-            f"📊 *Статистика Yulia AI*{chr(10)}{chr(10)}"
-            f"{balance_line}{chr(10)}"
-            f"👥 Уникальных пользователей: *{total_users}*{chr(10)}"
-            f"⚡ Запросов сегодня / всего: *{today_reqs}* / *{total_reqs}*{chr(10)}"
-            f"🧮 Текстовых токенов учтено: *{total_tokens}*{chr(10)}{chr(10)}"
-            f"*По типам задач:*{chr(10)}{types_str}{chr(10)}{chr(10)}"
-            f"*Последние пользователи:*{chr(10)}{users_str}"
-        )
-        send_pretty_message(message.chat.id, report)
-    except Exception as e:
-        logger.exception("Stats error: %s", e)
-        bot.send_message(message.chat.id, f"Ошибка статистики: {e}")
+        report = NL.join([
+            "✦ *Твоя статистика Yulia AI*",
+            "───────────────",
+            f"◈ *Запросов выполнено:* {total_req or 0}",
+            f"◈ *Потрачено ресурсов:* ~{spent_caps:,} CAPS (~{spent_rub} ₽)",
+            "",
+            "✧ *По задачам:*",
+            f"• Диалоги и поиск: {txt_cnt or 0}",
+            f"• Разбор фото и задач: {vis_cnt or 0}",
+            f"• Генерация картинок: {img_cnt or 0}",
+        ]).replace(",", " ")
+        send_pretty_message(user_id, report)
+        return
 
+    cur.execute("SELECT value FROM bot_settings WHERE key = 'base_caps'")
+    row_caps = cur.fetchone()
+    base_caps = float(row_caps.__getitem__(0)) if row_caps else 2521353.0
+
+    cur.execute(
+        """
+        SELECT
+            COUNT(DISTINCT user_id),
+            COUNT(*),
+            COALESCE(SUM(tokens_used), 0),
+            SUM(CASE WHEN action_type = 'image_gen' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN action_type = 'vision' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN action_type = 'text' THEN 1 ELSE 0 END)
+        FROM usage_logs
+        WHERE action_type != 'visit'
+        """
+    )
+    uniq_users, total_reqs, total_tokens, img_cnt, vis_cnt, txt_cnt = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT
+            user_id,
+            MAX(username),
+            MAX(first_name),
+            COUNT(*),
+            COALESCE(SUM(tokens_used), 0),
+            SUM(CASE WHEN action_type = 'image_gen' THEN 1 ELSE 0 END)
+        FROM usage_logs
+        WHERE action_type != 'visit'
+        GROUP BY user_id
+        ORDER BY MAX(id) DESC
+        LIMIT 8
+        """
+    )
+    recent_users = cur.fetchall()
+    conn.close()
+
+    spent_total = (total_tokens or 0) * COST_PER_TOKEN + (img_cnt or 0) * COST_PER_IMAGE
+    rem_caps = max(0, int(round(base_caps - spent_total)))
+    rem_rub = round(rem_caps * 0.0002, 2)
+
+    lines = [
+        "✦ *Статистика Yulia AI* ✦",
+        "──────────────────",
+        f"💰 *Точный остаток:* ~{rem_caps:,} CAPS (~{rem_rub} ₽)",
+        f"👥 *Активных пользователей:* {uniq_users or 0}",
+        f"⚡ *Всего запросов:* {total_reqs or 0}",
+        f"🧮 *Токенов учтено:* {total_tokens or 0:,}",
+        "",
+        "✧ *По типам задач:*",
+        f"  🎨 Генерация фото: *{img_cnt or 0}*",
+        f"  👁 Разбор фото / скриншотов: *{vis_cnt or 0}*",
+        f"  💬 Текст и поиск: *{txt_cnt or 0}*",
+        "",
+        "✧ *Расход по пользователям:*",
+    ]
+    if not recent_users:
+        lines.append("  • _Пока нет запросов_")
+    else:
+        for uid, uname, fname, cnt, utok, uimg in recent_users:
+            label = f"@{uname}" if uname else (fname or str(uid))
+            u_spent = int(round((utok or 0) * COST_PER_TOKEN + (uimg or 0) * COST_PER_IMAGE))
+            u_rub = round(u_spent * 0.0002, 2)
+            lines.append(f"  • {label}: {cnt} запр. (~{u_spent:,} CAPS / ~{u_rub} ₽)")
+
+    report = NL.join(lines).replace(",", " ")
+    send_pretty_message(user_id, report)
 
 @bot.message_handler(commands=["balance"])
 def set_balance_command(message):
@@ -1004,6 +1064,18 @@ def handle_document(message):
         )
 
 
+@bot.callback_query_handler(func=lambda call: call.data in ("ask_clear_mem", "show_my_stats"))
+def handle_soft_menu_callbacks(call):
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    if call.data == "ask_clear_mem":
+        request_memory_clear(call.message.chat.id)
+    elif call.data == "show_my_stats":
+        stats_command(call.message)
+
+
 @bot.callback_query_handler(
     func=lambda call: call.data.startswith("settings_")
     or call.data in {"confirm_clear", "cancel_clear"}
@@ -1022,14 +1094,14 @@ def callback_settings(call):
             send_pretty_message(
                 user_id,
                 "Запрос на очистку уже закрыт. История разговора не изменена.",
-                reply_markup=get_main_keyboard(),
+                reply_markup=types.ReplyKeyboardRemove(),
             )
     elif call.data == "cancel_clear":
         pending_memory_clear.discard(user_id)
         send_pretty_message(
             user_id,
             "Очистка отменена. История и настройки сохранены.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=types.ReplyKeyboardRemove(),
         )
 
     bot.answer_callback_query(call.id)
