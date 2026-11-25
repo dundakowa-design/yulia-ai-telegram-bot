@@ -1,3 +1,5 @@
+import socket
+socket.setdefaulttimeout(12)
 import io
 from PIL import Image
 import socket
@@ -375,12 +377,18 @@ def ask_claude(user_id, user_text):
 
     user_histories[user_id].append({"role": "user", "content": user_text})
 
-    response = client.chat.completions.create(
-        model="gemini-2.5-flash",
-        messages=user_histories[user_id],
-        tools=BOT_TOOLS,
-        tool_choice="auto",
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gemini-2.5-flash",
+            messages=user_histories[user_id],
+            tools=BOT_TOOLS,
+            tool_choice="auto",
+        )
+    except Exception:
+        response = client.chat.completions.create(
+            model="gemini-2.5-flash",
+            messages=user_histories[user_id],
+        )
     used_tokens = getattr(getattr(response, "usage", None), "total_tokens", 0)
     log_usage(user_id, "text", used_tokens)
 
@@ -713,22 +721,10 @@ def start_message(message):
     user_id = message.chat.id
     log_usage(user_id, "visit", 0, getattr(message.from_user, "username", None), getattr(message.from_user, "first_name", None))
     try:
-        with keep_typing(user_id, "typing"):
-            answer = ask_claude(user_id, text)
-        if answer:
-            send_pretty_message(user_id, answer)
+        bot.send_photo(user_id, "https://iili.io/oq9QW3g.png")
     except Exception as e:
-        logger.exception("Text handling error for %s: %s", user_id, e)
-        try:
-            send_pretty_message(user_id, "⚠️ Связь на секунду прервалась. Попробуй отправить сообщение ещё раз!")
-        except Exception:
-            pass
-    except Exception as e:
-        logger.exception("Text message handling failed for user %s: %s", user_id, e)
-        try:
-            send_pretty_message(user_id, "⚠️ Связь с нейросетью на секунду прервалась. Попробуй отправить сообщение ещё раз!")
-        except Exception:
-            pass
+        logger.warning("Welcome photo failed: %s", e)
+    show_welcome(message)
 
 
 @bot.message_handler(content_types=["voice"])
@@ -1040,4 +1036,9 @@ def callback_settings(call):
 
 
 print("Мультимодальный бот с генерацией картинок запущен!")
-bot.infinity_polling(timeout=10, long_polling_timeout=20)
+while True:
+    try:
+        bot.polling(none_stop=True, interval=1.0, timeout=5, long_polling_timeout=0)
+    except Exception as _pe:
+        logger.warning("Polling reconnect: %s", _pe)
+        import time as _pt; _pt.sleep(0.5)
