@@ -2,105 +2,116 @@ import io
 import os
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-BG_PATH = os.path.join(os.path.dirname(__file__), "assets", "stats_bg.png")
+BASE_DIR = os.path.dirname(__file__)
+BG_PATH = os.path.join(BASE_DIR, "assets", "stats_bg.png")
+FONTS_DIR = os.path.join(BASE_DIR, "assets", "fonts")
+
+FALLBACK_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FALLBACK_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
+def _load_font(weight_name, size, is_bold=False):
+    path = os.path.join(FONTS_DIR, f"Manrope-{weight_name}.ttf")
+    if os.path.exists(path) and os.path.getsize(path) > 10000:
+        return ImageFont.truetype(path, size)
+    return ImageFont.truetype(FALLBACK_BOLD if is_bold else FALLBACK_REG, size)
 
 
 def build_stats_card(rem_caps, rem_rub, uniq_users, total_reqs, total_tokens, img_cnt, vis_cnt, txt_cnt):
     if not os.path.exists(BG_PATH):
         return None
 
-    W, H = 1350, 900
+    # Холст 1440x810 (пропорция 16:9, масштаб x2.25 от 640x360)
+    W, H = 1440, 810
     base = Image.open(BG_PATH).convert("RGBA")
-
-    canvas = Image.new("RGBA", (W, H), (233, 240, 235, 255))
-    scale = H / base.height
-    nw, nh = int(base.width * scale), H
-    base_resized = base.resize((nw, nh), Image.Resampling.LANCZOS)
-
-    left_offset = -int(nw * 0.21)
-    canvas.alpha_composite(base_resized, (left_offset, 0))
+    canvas = base.resize((W, H), Image.Resampling.LANCZOS)
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    panel_left = 575
-    panel_right = 1310
-    draw.rounded_rectangle(
-        (panel_left, 38, panel_right, 862),
-        radius=36,
-        fill=(247, 243, 234, 255),
-        outline=(212, 178, 106, 255),
-        width=4,
-    )
+    # Границы родной золотой рамки на stats_bg.png (ничего поверх неё не заливаем)
+    frame_left, frame_top = 45, 45
+    frame_right, frame_bottom = 1068, 735
+    pad_x = 54  # 24 px * 2.25 единый левый и правый внутренний отступ
+    content_x = frame_left + pad_x
 
-    draw.line(((panel_left + 40, 130), (panel_right - 40, 130)), fill=(212, 178, 106, 210), width=3)
+    # Палитра Premium Soft
+    c_task_bg = (228, 238, 232, 195)     # #E4EEE8 лёгкий полупрозрачный фон блока задач
+    c_divider = (216, 200, 167, 230)     # #D8C8A7 разделители
+    c_text_main = (48, 59, 56, 255)      # #303B38 основной текст
+    c_text_sub = (86, 98, 92, 255)       # #68736D (чуть плотнее для чёткости на стекле)
+    c_balance = (40, 116, 95, 255)       # #28745F баланс
+    c_accent = (186, 150, 91, 255)       # #BA965B акценты
 
-    # Нижняя мятная плашка с более компактной высотой (без лишней пустоты снизу)
-    draw.rounded_rectangle(
-        (panel_left + 32, 588, panel_right - 32, 830),
-        radius=26,
-        fill=(226, 241, 233, 255),
-        outline=(168, 204, 186, 255),
-        width=2,
-    )
+    # Шрифты Manrope (масштаб x2.25)
+    f_title = _load_font("Bold", 45, is_bold=True)        # 20 px
+    f_balance = _load_font("Bold", 43, is_bold=True)      # 19 px
+    f_val = _load_font("SemiBold", 36, is_bold=True)      # 16 px
+    f_label = _load_font("Regular", 27, is_bold=False)    # 12 px
+    f_sub_title = _load_font("Bold", 32, is_bold=True)    # 14 px
+    f_cat_name = _load_font("Medium", 26, is_bold=False)  # 11.5 px
+    f_cat_num = _load_font("Bold", 38, is_bold=True)      # 17 px
 
-    # Увеличенные шрифты для комфортного чтения с телефона
-    f_title = ImageFont.truetype(FONT_BOLD, 42)
-    f_label = ImageFont.truetype(FONT_REG, 29)
-    f_val_big = ImageFont.truetype(FONT_BOLD, 39)
-    f_val = ImageFont.truetype(FONT_BOLD, 36)
-    f_sub = ImageFont.truetype(FONT_BOLD, 29)
-    f_task_lbl = ImageFont.truetype(FONT_REG, 25)
-    f_task_val = ImageFont.truetype(FONT_BOLD, 36)
+    # 1. Заголовок по левому краю внутри родной рамки
+    draw.text((content_x, frame_top + 28), "Статистика Yulia AI", font=f_title, fill=c_text_main)
 
-    c_dark = (36, 46, 42, 255)
-    c_muted = (78, 90, 84, 255)
-    c_gold_deep = (138, 98, 30, 255)
-    c_mint_dark = (38, 104, 80, 255)
+    # Горизонтальный разделитель #D8C8A7
+    line_y = frame_top + 92
+    draw.line(((content_x, line_y), (frame_right - pad_x, line_y)), fill=c_divider, width=2)
 
-    draw.text((panel_left + 40, 64), "✦ Статистика Yulia AI", font=f_title, fill=c_dark)
-
+    # 2. Основные показатели с равномерными вертикальными интервалами
     caps_str = f"~{rem_caps:,}".replace(",", " ") + f" CAPS (~{rem_rub} ₽)"
     tok_str = f"{total_tokens:,}".replace(",", " ")
 
     metrics = (
-        ("Ориентировочный остаток:", caps_str, f_val_big, c_mint_dark),
-        ("Активных пользователей:", str(uniq_users), f_val, c_dark),
-        ("Всего запросов:", str(total_reqs), f_val, c_dark),
-        ("Токенов учтено:", tok_str, f_val, c_dark),
+        ("Ориентировочный остаток", caps_str, f_balance, c_balance),
+        ("Активных пользователей", str(uniq_users), f_val, c_text_main),
+        ("Всего запросов", str(total_reqs), f_val, c_text_main),
+        ("Токенов учтено", tok_str, f_val, c_text_main),
     )
 
-    # Больше воздуха между строками показателей
-    y = 152
+    y = line_y + 18
+    step_y = 90
     for lbl, val, font_v, color_v in metrics:
-        draw.text((panel_left + 40, y), lbl, font=f_label, fill=c_muted)
-        draw.text((panel_left + 40, y + 38), val, font=font_v, fill=color_v)
-        y += 106
+        draw.text((content_x, y), lbl, font=f_label, fill=c_text_sub)
+        draw.text((content_x, y + 32), val, font=font_v, fill=color_v)
+        y += step_y
 
-    # Более контрастный заголовок мятного блока
-    draw.text((panel_left + 54, 606), "По типам задач", font=f_sub, fill=c_gold_deep)
+    # 3. Блок «По типам задач» (#E4EEE8) строго внутри золотой рамки
+    box_left = content_x
+    box_right = frame_right - pad_x
+    box_top = frame_bottom - 182
+    box_bottom = frame_bottom - 26
 
-    col_w = (panel_right - panel_left - 64) // 3
-    cols = (
-        ("Генерация фото", str(img_cnt), panel_left + 32 + col_w // 2),
-        ("Анализ фото", str(vis_cnt), panel_left + 32 + col_w + col_w // 2),
-        ("Текст и поиск", str(txt_cnt), panel_left + 32 + col_w * 2 + col_w // 2),
+    draw.rounded_rectangle(
+        (box_left, box_top, box_right, box_bottom),
+        radius=22,
+        fill=c_task_bg,
+        outline=c_divider,
+        width=2,
     )
+
+    draw.text((box_left + 32, box_top + 15), "По типам задач", font=f_sub_title, fill=c_accent)
+
+    inner_w = box_right - box_left
+    col_w = inner_w // 3
+    cols = (
+        ("Генерация фото", str(img_cnt), box_left + col_w // 2),
+        ("Анализ фото", str(vis_cnt), box_left + col_w + col_w // 2),
+        ("Текст и поиск", str(txt_cnt), box_left + col_w * 2 + col_w // 2),
+    )
+
     for title_c, num_c, cx in cols:
-        x0, y0, x1, y1 = draw.textbbox((0, 0), title_c, font=f_task_lbl)
-        tw = x1 - x0
-        draw.text((cx - tw // 2, 668), title_c, font=f_task_lbl, fill=c_muted)
+        x0, _, x1, _ = draw.textbbox((0, 0), title_c, font=f_cat_name)
+        draw.text((cx - (x1 - x0) // 2, box_top + 62), title_c, font=f_cat_name, fill=c_text_sub)
 
-        nx0, ny0, nx1, ny1 = draw.textbbox((0, 0), num_c, font=f_task_val)
-        nw_txt = nx1 - nx0
-        draw.text((cx - nw_txt // 2, 724), num_c, font=f_task_val, fill=c_dark)
+        nx0, _, nx1, _ = draw.textbbox((0, 0), num_c, font=f_cat_num)
+        draw.text((cx - (nx1 - nx0) // 2, box_top + 98), num_c, font=f_cat_num, fill=c_text_main)
 
-    div1 = panel_left + 32 + col_w
-    div2 = panel_left + 32 + col_w * 2
-    draw.line(((div1, 662), (div1, 798)), fill=(168, 204, 186, 220), width=2)
-    draw.line(((div2, 662), (div2, 798)), fill=(168, 204, 186, 220), width=2)
+    div1 = box_left + col_w
+    div2 = box_left + col_w * 2
+    draw.line(((div1, box_top + 60), (div1, box_bottom - 16)), fill=c_divider, width=2)
+    draw.line(((div2, box_top + 60), (div2, box_bottom - 16)), fill=c_divider, width=2)
 
     result = Image.alpha_composite(canvas, overlay).convert("RGB")
     buf = io.BytesIO()
