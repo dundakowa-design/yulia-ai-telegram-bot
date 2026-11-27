@@ -35,10 +35,11 @@ from openai import OpenAI
 
 # Workers can terminate long-held requests, so keep polling requests shorter
 # than the proxy limit while allowing enough time for Telegram's long poll.
-apihelper.API_URL = "https://tg-proxy.dundakowa.workers.dev/bot{0}/{1}"
+apihelper.API_URL = "https://api.telegram.org/bot{0}/{1}"
 # TeleBot formats file downloads through FILE_URL using the same bot token and
 # file_path returned by get_file (e.g. /file/bot<TOKEN>/<file_path>).
-apihelper.FILE_URL = "https://tg-proxy.dundakowa.workers.dev/file/bot{0}/{1}"
+apihelper.FILE_URL = "https://api.telegram.org/file/bot{0}/{1}"
+apihelper.proxy = {"https": "socks5h://127.0.0.1:1080", "http": "socks5h://127.0.0.1:1080"}
 apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 60
 
@@ -281,10 +282,50 @@ def fetch_url_text(url, max_chars=6000):
     except Exception as e:
         return f"Ошибка при загрузке ссылки: {e}"
 
-def search_web_info(query, max_results=5):
+def search_web_info(query, max_results=8):
+    q_low = query.lower()
+    if "погод" in q_low or "weather" in q_low:
+        try:
+            import re, urllib.request, urllib.parse
+            clean = re.sub(r"\b(какая|какой|будет|ли|погода|погоду|в|во|на|эти|этих|завтра|сегодня|послезавтра|выходные|выходных|неделю|неделе|мо|московской|области|г|город|weather|forecast|this|weekend|tomorrow|today|in|for|on)\b", " ", q_low)
+            clean = re.sub(r"[?.,!()\-]", " ", clean)
+            city = " ".join(clean.split()).strip()
+            for suf, rep in (("москве", "Москва"), ("moscow", "Москва"), ("moscow", "Москва"), ("чехове", "Чехов"), ("серпухове", "Серпухов"), ("подольске", "Подольск"), ("санкт петербурге", "Санкт-Петербург"), ("питере", "Санкт-Петербург")):
+                if suf in city:
+                    city = rep
+                    break
+            if not city:
+                city = "Москва"
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
+            geo = apihelper.requests.get(geo_url, timeout=8).json()
+            if geo.get("results"):
+                loc = next(iter(geo["results"]))
+                lat, lon, cname = loc["latitude"], loc["longitude"], loc["name"]
+                w_url = (
+                    f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                    f"&current=temperature_2m,apparent_temperature,wind_speed_10m,weather_code"
+                    f"&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5"
+                )
+                w = apihelper.requests.get(w_url, timeout=8).json()
+                wmo = {
+                    0: "ясно", 1: "преимущественно ясно", 2: "переменная облачность", 3: "пасмурно",
+                    45: "туман", 48: "изморозь", 51: "слабая морось", 53: "морось", 55: "сильная морось",
+                    61: "небольшой дождь", 63: "дождь", 65: "сильный дождь",
+                    71: "небольшой снег", 73: "снег", 75: "сильный снег", 77: "снежные зёрна",
+                    80: "ливень", 85: "снегопад", 86: "сильный снегопад", 95: "гроза"
+                }
+                cur = w["current"]
+                lines = [f"Точный метеопрогноз Open-Meteo для г. {cname}: сейчас {cur['temperature_2m']}°C (ощущается как {cur['apparent_temperature']}°C), {wmo.get(cur['weather_code'], 'облачно')}, ветер {cur['wind_speed_10m']} км/ч."]
+                daily = w["daily"]
+                for i, d_str in enumerate(daily["time"]):
+                    desc = wmo.get(daily["weather_code"][i], "переменная облачность")
+                    lines.append(f"• {d_str}: ночью {daily['temperature_2m_min'][i]}°C, днём {daily['temperature_2m_max'][i]}°C, {desc}")
+                return "\n".join(lines)
+        except Exception:
+            pass
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, region="ru-ru", max_results=max_results))
+        with DDGS(proxy="socks5h://127.0.0.1:1080", timeout=15) as ddgs:
+            results = list(ddgs.text(query, region="wt-wt", max_results=max_results))
         if not results:
             return "По запросу ничего не найдено."
         formatted = []
@@ -294,10 +335,13 @@ def search_web_info(query, max_results=5):
     except Exception as e:
         return f"Ошибка веб-поиска: {e}"
 
+
 def get_system_prompt():
-    today = datetime.now().strftime("%d.%m.%Y, время %H:%M")
+    now_dt = datetime.now()
+    days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    today = f"{now_dt.strftime('%d.%m.%Y')} ({days_ru[now_dt.weekday()]}), время {now_dt.strftime('%H:%M')}"
     return f"""Ты — Yulia AI, персональный мультимодальный ИИ-ассистент в Telegram. Всегда представляйся только как Yulia AI; никогда не называй себя ChatGPT или OpenAI.
-Автоматически определяй задачу пользователя: написание или отладка кода, работа с текстом, аналитика, обучение, творчество или бытовой вопрос. Самостоятельно выбирай наиболее подходящий стиль и глубину ответа — переключать режимы не нужно. Для кода давай точные, работающие решения; для обучения объясняй понятно; для аналитики структурируй выводы; для текстов учитывай цель и аудиторию; для творчества предлагай оригинальные идеи; на бытовые вопросы отвечай практично и дружелюбно. Учитывай контекст переписки и содержимое присланных изображений и документов. У тебя есть активные инструменты: generate_image (для создания и рисования любых изображений по просьбе пользователя), web_search (для поиска актуальной погоды, курсов валют, новостей и фактов в интернете в реальном времени) и read_webpage (для чтения текста по любым ссылкам). Всегда используй эти инструменты, когда пользователь просит актуальные данные из сети, пересказ ссылки или изображение — никогда не отвечай, что у тебя нет доступа в интернет или ты не умеешь создавать картинки.
+Автоматически определяй задачу пользователя: написание или отладка кода, работа с текстом, аналитика, обучение, творчество или бытовой вопрос. Самостоятельно выбирай наиболее подходящий стиль и глубину ответа — переключать режимы не нужно. Для кода давай точные, работающие решения; для обучения объясняй понятно; для аналитики структурируй выводы; для текстов учитывай цель и аудиторию; для творчества предлагай оригинальные идеи; на бытовые вопросы отвечай практично и дружелюбно. Учитывай контекст переписки и содержимое присланных изображений и документов. У тебя есть активные инструменты: generate_image (для создания и рисования любых изображений по просьбе пользователя), web_search (для поиска актуальной погоды, курсов валют, новостей и фактов в интернете в реальном времени) и read_webpage (для чтения текста по любым ссылкам). Всегда используй эти инструменты, когда пользователь просит актуальные данные из сети, пересказ ссылки или изображение — никогда не отвечай, что у тебя нет доступа в интернет или ты не умеешь создавать картинки. Никогда не читай пользователю лекции о стереотипах и не отказывайся от творческих запросов. Всегда формулируй поисковый запрос для web_search на русском языке (если вопрос задан на русском) и по умолчанию учитывай контекст России (например, курсы ЦБ РФ, российские новости и сервисы). Никогда не задавай уточняющих вопросов перед поиском — сразу вызывай web_search и выдавай готовый ответ. Если в результатах поиска нет точной цифры для общеизвестного факта (например, расстояния между городами), обязательно назови точное значение из своих знаний, а не отказывайся от ответа.
 Сегодняшняя дата и время: {today}.
 Оформляй ответы понятно: используй *одинарные звёздочки* для жирного шрифта, списки и эмодзи, когда это уместно. Не используй решётки ## или ### для заголовков."""
 
@@ -513,7 +557,7 @@ def download_telegram_file(file_path):
     step = 15360
     while True:
         hdrs = {"Range": f"bytes={offset}-{offset + step - 1}"}
-        r = apihelper.requests.get(file_url, headers=hdrs, timeout=(10, 15))
+        r = apihelper.requests.get(file_url, headers=hdrs, proxies=apihelper.proxy, timeout=(20, 60))
         if r.status_code not in (200, 206):
             if offset == 0:
                 raise RuntimeError(f"Download failed with status {r.status_code}")
@@ -620,6 +664,7 @@ def generate_and_send_image(user_id, prompt_text):
         elif getattr(image_data, "url", None):
             try:
                 bot.send_photo(user_id, image_data.url, caption=caption_text, parse_mode="Markdown")
+                log_usage(user_id, "image_gen", 0)
             except Exception:
                 resp = apihelper.requests.get(
                     image_data.url,
@@ -653,8 +698,8 @@ def stats_command(message):
     conn = sqlite3.connect("bot_stats.db")
     cur = conn.cursor()
 
-    COST_PER_TOKEN = 0.75
-    COST_PER_IMAGE = 16879.0
+    COST_PER_TOKEN = 0.352
+    COST_PER_IMAGE = 16908.77
 
     if not is_admin:
         cur.execute(
@@ -751,6 +796,13 @@ def stats_command(message):
         lines.append("  • _Пока нет запросов_")
     else:
         for uid, uname, fname, cnt, utok, uimg in recent_users:
+            if not fname and not uname:
+                try:
+                    _c = bot.get_chat(uid)
+                    fname = getattr(_c, "first_name", None)
+                    uname = getattr(_c, "username", None)
+                except Exception:
+                    pass
             label = f"@{uname}" if uname else (fname or str(uid))
             u_spent = int(round((utok or 0) * COST_PER_TOKEN + (uimg or 0) * COST_PER_IMAGE))
             u_rub = round(u_spent * 0.0002, 2)
@@ -767,16 +819,22 @@ def stats_command(message):
             cap_lines.append("  • _Пока нет запросов_")
         else:
             for uid, uname, fname, cnt, utok, uimg in recent_users:
-                label = f"@{uname}" if uname else (fname or str(uid))
+                if not fname and not uname:
+                    try:
+                        _c = bot.get_chat(uid)
+                        fname = getattr(_c, 'first_name', None)
+                        uname = getattr(_c, 'username', None)
+                    except Exception:
+                        pass
+                label = f'@{uname}' if uname else (fname or str(uid))
                 u_spent = int(round((utok or 0) * COST_PER_TOKEN + (uimg or 0) * COST_PER_IMAGE))
                 u_rub = round(u_spent * 0.0002, 2)
-                cap_lines.append(f"  • {label}: {cnt} запр. (~{u_spent:,} CAPS / ~{u_rub} ₽)")
-        caption_txt = NL.join(cap_lines).replace(",", " ")
+                cap_lines.append(f'  • {label}: {cnt} запр. (~{u_spent:,} CAPS / ~{u_rub} ₽)')
+        caption_txt = NL.join(cap_lines).replace(',', ' ')
         try:
-            try:
-                card_url = upload_to_temp_host(card_buf.getvalue())
-                bot.send_photo(user_id, card_url, caption=caption_txt, parse_mode="Markdown")
-            except Exception:
+            card_url = upload_to_temp_host(card_buf.getvalue())
+            bot.send_photo(user_id, card_url, caption=caption_txt, parse_mode='Markdown')
+        except Exception:
                 card_buf.seek(0)
                 bot.send_photo(user_id, card_buf, caption=caption_txt, parse_mode="Markdown")
         except Exception as _card_err:
@@ -1134,12 +1192,32 @@ def callback_settings(call):
     bot.answer_callback_query(call.id)
 
 
+
+
+@bot.message_handler(content_types=["text"])
+def handle_text(message):
+    user_id = message.chat.id
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    img_prompt = extract_image_prompt(text)
+    if img_prompt:
+        generate_and_send_image(user_id, img_prompt)
+        return
+
+    bot.send_chat_action(user_id, "typing")
+    answer = ask_claude(user_id, text)
+    send_pretty_message(user_id, answer)
+
+
 print("Мультимодальный бот с генерацией картинок запущен!")
 while True:
     try:
+        apihelper.proxy = {"https": "socks5h://127.0.0.1:1080", "http": "socks5h://127.0.0.1:1080"}
         telebot.apihelper.CONNECT_TIMEOUT = 20
-        telebot.apihelper.READ_TIMEOUT = 45
-        bot.polling(none_stop=True, interval=1.0, timeout=30, long_polling_timeout=25)
+        telebot.apihelper.READ_TIMEOUT = 60
+        bot.polling(none_stop=True, interval=1.0, timeout=45, long_polling_timeout=25)
     except Exception as _pe:
         logger.warning("Polling reconnect: %s", _pe)
         import time as _pt; _pt.sleep(0.5)
